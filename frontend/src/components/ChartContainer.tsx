@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BusinessDay,
   CandlestickData,
@@ -104,11 +104,78 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
   const lastUserInteractionRef = useRef<number>(Date.now());
   const intervalRef = useRef<Interval>(interval);
   const candlesRef = useRef<Candle[]>([]);
+  const autoFollowRef = useRef(true);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
+  const [isAutoFollow, setIsAutoFollow] = useState(true);
+  const suppressRangeEventRef = useRef(false);
+
+  const scheduleReleaseSuppression = useCallback(() => {
+    window.setTimeout(() => {
+      suppressRangeEventRef.current = false;
+    }, 0);
+  }, []);
+
+  const applyVisibleRange = useCallback((range: LogicalRange | null) => {
+    if (!chartRef.current || !range) {
+      return;
+    }
+    suppressRangeEventRef.current = true;
+    chartRef.current.timeScale().setVisibleLogicalRange(range);
+    scheduleReleaseSuppression();
+  }, [scheduleReleaseSuppression]);
+
+  const scrollToLatest = useCallback(() => {
+    const chart = chartRef.current;
+    if (!chart) {
+      return;
+    }
+    suppressRangeEventRef.current = true;
+    chart.timeScale().scrollToRealTime();
+    chart.timeScale().applyOptions({ rightOffset: DEFAULT_RIGHT_OFFSET });
+    scheduleReleaseSuppression();
+  }, [scheduleReleaseSuppression]);
+
+  const disableAutoFollow = useCallback(() => {
+    if (!autoFollowRef.current) {
+      return;
+    }
+    autoFollowRef.current = false;
+    setIsAutoFollow(false);
+  }, []);
+
+  const enableAutoFollow = useCallback(() => {
+    autoFollowRef.current = true;
+    stayAtRightRef.current = true;
+    setIsAutoFollow(true);
+    const chart = chartRef.current;
+    if (chart) {
+      scrollToLatest();
+    }
+    lastUserInteractionRef.current = Date.now();
+  }, [scrollToLatest]);
 
   useEffect(() => {
     intervalRef.current = interval;
   }, [interval]);
+
+  useEffect(() => {
+    if (!autoFollowRef.current) {
+      return;
+    }
+    if (candles.length === 0) {
+      return;
+    }
+
+    const prevLength = previousLengthRef.current;
+    if (candles.length < prevLength) {
+      return;
+    }
+
+    if (prevLength > 0 && candles[0].time < (candlesRef.current[0]?.time ?? candles[0].time)) {
+      return;
+    }
+
+  }, [candles, applyVisibleRange]);
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -165,6 +232,7 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     const container = containerRef.current;
     const markPointerInteraction = () => {
       lastUserInteractionRef.current = Date.now();
+      disableAutoFollow();
     };
 
     container?.addEventListener("pointerdown", markPointerInteraction);
@@ -263,6 +331,7 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     const prevFirstTime = firstTimeRef.current;
     const prevLength = previousLengthRef.current;
     const lastCandle = candles[candles.length - 1];
+    const stepSeconds = INTERVAL_STEP_SECONDS[intervalRef.current] ?? (candles[1] ? Math.max(1, candles[1].time - candles[0].time) : 0);
     const formattedLast: CandlestickData = {
       time: lastCandle.time as UTCTimestamp,
       open: lastCandle.open,
@@ -284,7 +353,7 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     const scrollPosition = timeScale.scrollPosition();
     const isPinnedToRight = typeof scrollPosition === "number" ? scrollPosition <= 0.5 : stayAtRightRef.current;
     const userActiveRecently = now - lastUserInteractionRef.current <= RECENT_INTERACTION_MS;
-    const shouldPreserveRange = mode === "realtime" && appended && (!isPinnedToRight || userActiveRecently);
+  const shouldPreserveRange = mode === "realtime" && appended && (!autoFollowRef.current || !isPinnedToRight || userActiveRecently);
     const previousRange = shouldPreserveRange ? currentRange : null;
     const lastLogicalIndex = candles.length > 0 ? candles.length - 1 : 0;
 
@@ -296,6 +365,12 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     };
 
     if (needsFullSeries) {
+      if (prevLength === 0) {
+        autoFollowRef.current = true;
+        stayAtRightRef.current = true;
+        setIsAutoFollow(true);
+      }
+
       const formattedAll: CandlestickData[] = candles.map((candle) => ({
         time: candle.time as UTCTimestamp,
         open: candle.open,
@@ -304,27 +379,40 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
         close: candle.close
       }));
       seriesRef.current.setData(formattedAll);
-      if (mode === "realtime") {
-        const initialRange = buildPinnedRange(currentRange);
-        timeScale.setVisibleLogicalRange(initialRange);
-        stayAtRightRef.current = true;
-        previousLengthRef.current = candles.length;
-        firstTimeRef.current = firstTime;
-        return;
+      
+      // 仅在初次加载时滚动到最新
+      if (prevLength === 0 && mode === "realtime") {
+        suppressRangeEventRef.current = true;
+        timeScale.applyOptions({ rightOffset: DEFAULT_RIGHT_OFFSET });
+        timeScale.scrollToRealTime();
+        scheduleReleaseSuppression();
+      } else if (currentRange && mode !== "realtime") {
+        const addedBars = prevFirstTime !== null && stepSeconds > 0 ? Math.round((prevFirstTime - firstTime) / stepSeconds) : 0;
+        if (addedBars !== 0) {
+          const shiftedRange = {
+            from: currentRange.from + addedBars,
+            to: currentRange.to + addedBars
+          } as LogicalRange;
+          applyVisibleRange(shiftedRange);
+        } else {
+          applyVisibleRange(currentRange);
+        }
       }
+      previousLengthRef.current = candles.length;
+      firstTimeRef.current = firstTime;
+      return;
     } else {
       seriesRef.current.update(formattedLast);
     }
 
-    if (mode === "realtime" && appended) {
-      if (isPinnedToRight && !userActiveRecently) {
-        const targetRange = buildPinnedRange(currentRange ?? timeScale.getVisibleLogicalRange());
-        timeScale.setVisibleLogicalRange(targetRange);
-        stayAtRightRef.current = true;
-        timeScale.applyOptions({ rightOffset: DEFAULT_RIGHT_OFFSET });
-      } else if (previousRange) {
-        timeScale.setVisibleLogicalRange(previousRange);
-      }
+    // realtime 模式下只在自动跟随启用时调整视图
+    if (mode === "realtime" && appended && autoFollowRef.current && isPinnedToRight && !userActiveRecently) {
+      const targetRange = buildPinnedRange(currentRange ?? timeScale.getVisibleLogicalRange());
+      suppressRangeEventRef.current = true;
+      applyVisibleRange(targetRange);
+      stayAtRightRef.current = true;
+      timeScale.applyOptions({ rightOffset: DEFAULT_RIGHT_OFFSET });
+      scheduleReleaseSuppression();
     }
 
     previousLengthRef.current = candles.length;
@@ -367,6 +455,10 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     const timeScale = chartRef.current.timeScale();
 
     const handleRangeChange = (range: LogicalRange | null) => {
+      if (suppressRangeEventRef.current) {
+        return;
+      }
+
       if (!range || candles.length === 0) {
         return;
       }
@@ -379,6 +471,7 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
         }
         if (!stayAtRightRef.current && wasAtRight) {
           lastUserInteractionRef.current = Date.now();
+          disableAutoFollow();
         }
       }
 
@@ -442,6 +535,27 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       {hoverOverlay}
+      {!isAutoFollow && (
+        <button
+          type="button"
+          onClick={enableAutoFollow}
+          style={{
+            position: "absolute",
+            right: 16,
+            bottom: 16,
+            padding: "0.5rem 0.75rem",
+            borderRadius: 6,
+            border: "1px solid rgba(0,0,0,0.2)",
+            background: "rgba(17,17,17,0.85)",
+            color: "#fff",
+            fontSize: 12,
+            cursor: "pointer",
+            zIndex: 20
+          }}
+        >
+          回到最新
+        </button>
+      )}
     </div>
   );
 }
