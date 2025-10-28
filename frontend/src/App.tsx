@@ -73,9 +73,8 @@ function App() {
               unsubscribeRef.current = subscribeToRealtime({
                 symbol: selectedSymbol,
                 interval,
-                onCandle: (candle, _final) => {
+                onCandle: (candle, final) => {
               setRealtimeCandles((previous: Candle[]) => {
-                    void _final;
                 if (previous.length === 0) {
                   return [candle];
                 }
@@ -83,8 +82,16 @@ function App() {
                 const next = [...previous];
                 const index = next.findIndex((item) => item.time === candle.time);
                 if (index >= 0) {
-                  next[index] = { ...next[index], ...candle };
+                  // 只有当 final=true 时，才更新该 K 线；否则保留现有数据
+                  if (final) {
+                    next[index] = { ...next[index], ...candle };
+                  }
                   return next;
+                }
+
+                // 只有当 final=true 时，才新增 K 线
+                if (!final) {
+                  return previous;
                 }
 
                 next.push(candle);
