@@ -439,8 +439,8 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
   }
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 520 }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%", minHeight: 520 }} />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       {hoverOverlay}
     </div>
   );

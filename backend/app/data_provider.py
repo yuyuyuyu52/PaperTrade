@@ -139,6 +139,16 @@ class _StreamState:
             if latest_time is not None and open_time <= latest_time:
                 return
 
+        authoritative = await fetch_klines(
+            self.symbol,
+            self.interval,
+            start_ts=open_time,
+            end_ts=open_time,
+            limit=1,
+        )
+        if authoritative:
+            candle = authoritative[0]
+
         await run_in_threadpool(save_candles, self.symbol, self.interval, [candle])
         self.latest_time = open_time
         await _broadcast(self, {"candle": candle, "final": True})

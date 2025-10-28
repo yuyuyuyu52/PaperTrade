@@ -222,24 +222,8 @@ function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>TradingView 图表</h1>
-      </header>
-      <ControlsPanel
-        instruments={instruments}
-        selectedSymbol={selectedSymbol}
-        onSymbolChange={setSelectedSymbol}
-        interval={interval}
-        onIntervalChange={setInterval}
-        mode={mode}
-        onModeChange={setMode}
-        playbackControls={playbackControls}
-        playbackTimeline={playbackCandles}
-      />
-      <main className="chart-area">
-        {loading && <div className="loading">加载中...</div>}
-        {error && <div className="error">{error}</div>}
-        {!loading && !error && activeCandles.length > 0 && (
+      <div className="chart-wrapper">
+        {activeCandles.length > 0 && (
           <ChartContainer
             candles={activeCandles}
             mode={mode}
@@ -247,10 +231,25 @@ function App() {
             onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
           />
         )}
+        {loading && <div className="status-layer loading">加载中...</div>}
+        {error && <div className="status-layer error">{error}</div>}
         {!loading && !error && activeCandles.length === 0 && (
-          <div className="placeholder">暂无数据</div>
+          <div className="status-layer placeholder">暂无数据</div>
         )}
-      </main>
+        <div className="controls-overlay">
+          <ControlsPanel
+            instruments={instruments}
+            selectedSymbol={selectedSymbol}
+            onSymbolChange={setSelectedSymbol}
+            interval={interval}
+            onIntervalChange={setInterval}
+            mode={mode}
+            onModeChange={setMode}
+            playbackControls={playbackControls}
+            playbackTimeline={playbackCandles}
+          />
+        </div>
+      </div>
     </div>
   );
 }
