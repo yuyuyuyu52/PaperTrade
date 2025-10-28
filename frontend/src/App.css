@@ -6,58 +6,68 @@
   margin: 0;
   background: #f5f5f5;
   color: #111;
+  display: flex;
+  flex-direction: column;
+}
+
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: rgba(245, 245, 245, 0.95);
+  border-bottom: 1px solid #e0e0e0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  z-index: 25;
+  flex-shrink: 0;
+}
+
+.navbar-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.navbar-item label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #333;
+  min-width: 50px;
+}
+
+.navbar-item select,
+.navbar select {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 0.875rem;
+  cursor: pointer;
+  outline: none;
+}
+
+.navbar-item select:hover,
+.navbar select:hover {
+  border-color: #999;
+}
+
+.navbar-item select:focus,
+.navbar select:focus {
+  border-color: #22aa6a;
+  box-shadow: 0 0 0 2px rgba(34, 170, 106, 0.1);
 }
 
 .chart-wrapper {
   position: relative;
-  width: 100vw;
-  height: 100vh;
+  flex: 1;
+  width: 100%;
   overflow: hidden;
-}
-
-.controls-overlay {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 20;
-  background: rgba(245, 245, 245, 0.9);
-  border-radius: 8px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
-  padding: 0.75rem 1rem;
-  max-width: min(420px, 90vw);
-}
-
-.controls-overlay .controls-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  padding: 0;
-  background: transparent;
-}
-
-.control-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.controls-overlay .playback-controls {
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.control-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
 }
 
 .playback-controls {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  flex: 1;
-  min-width: 260px;
 }
 
 .playback-controls button {
@@ -66,6 +76,8 @@
   border-radius: 4px;
   padding: 0.35rem 0.75rem;
   cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.2s ease;
 }
 
 .playback-controls button:hover {
@@ -76,11 +88,16 @@
 
 .timeline-slider {
   flex: 1;
+  min-width: 150px;
+  height: 24px;
+  cursor: pointer;
 }
 
 .timeline-label {
-  min-width: 200px;
+  min-width: 180px;
   text-align: right;
+  font-size: 0.875rem;
+  color: #666;
 }
 
 .status-layer {

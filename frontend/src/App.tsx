@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChartContainer from "./components/ChartContainer";
-import ControlsPanel from "./components/ControlsPanel";
 import { usePlaybackController } from "./hooks/usePlaybackController";
 import { fetchCandles, fetchInstruments, fetchTimeRange } from "./services/api";
 import { subscribeToRealtime } from "./services/websocketClient";
@@ -204,24 +203,57 @@ function App() {
     }
   }, [interval, mode, selectedSymbol, setError]);
 
-  const playbackControls = useMemo(() => ({
-    isPlaying: playbackController.isPlaying,
-    cursorIndex: playbackController.cursorIndex,
-    onToggle: playbackController.togglePlay,
-    onStepForward: playbackController.stepForward,
-    onStepBackward: playbackController.stepBackward,
-    onSeek: playbackController.jumpTo
-  }), [
-    playbackController.isPlaying,
-    playbackController.cursorIndex,
-    playbackController.togglePlay,
-    playbackController.stepForward,
-    playbackController.stepBackward,
-    playbackController.jumpTo
-  ]);
-
   return (
     <div className="app">
+      <nav className="navbar">
+        <div className="navbar-item">
+          <label htmlFor="symbol">品种</label>
+          <select id="symbol" value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)}>
+            {instruments.map((instrument) => (
+              <option key={instrument.symbol} value={instrument.symbol}>
+                {instrument.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="navbar-item">
+          <label htmlFor="interval">时间级别</label>
+          <select id="interval" value={interval} onChange={(e) => setInterval(e.target.value as Interval)}>
+            {["1m", "5m", "15m", "1h", "4h", "1d"].map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </div>
+        <div className="navbar-item">
+          <label htmlFor="mode">模式</label>
+          <select id="mode" value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
+            <option value="realtime">实时模式</option>
+            <option value="playback">回放模式</option>
+          </select>
+        </div>
+        {mode === "playback" && (
+          <div className="playback-controls" style={{ marginLeft: "auto" }}>
+            <button type="button" onClick={playbackController.stepBackward}>⏮️</button>
+            <button type="button" onClick={playbackController.togglePlay}>
+              {playbackController.isPlaying ? "⏸️" : "▶️"}
+            </button>
+            <button type="button" onClick={playbackController.stepForward}>⏭️</button>
+            <input
+              type="range"
+              min={0}
+              max={Math.max(0, playbackCandles.length - 1)}
+              value={playbackController.cursorIndex}
+              onChange={(e) => playbackController.jumpTo(Number(e.target.value))}
+              className="timeline-slider"
+            />
+            <span className="timeline-label">
+              {playbackCandles.length > 0
+                ? new Date(playbackCandles[playbackController.cursorIndex]?.time * 1000).toLocaleString()
+                : "--"}
+            </span>
+          </div>
+        )}
+      </nav>
       <div className="chart-wrapper">
         {activeCandles.length > 0 && (
           <ChartContainer
@@ -236,19 +268,6 @@ function App() {
         {!loading && !error && activeCandles.length === 0 && (
           <div className="status-layer placeholder">暂无数据</div>
         )}
-        <div className="controls-overlay">
-          <ControlsPanel
-            instruments={instruments}
-            selectedSymbol={selectedSymbol}
-            onSymbolChange={setSelectedSymbol}
-            interval={interval}
-            onIntervalChange={setInterval}
-            mode={mode}
-            onModeChange={setMode}
-            playbackControls={playbackControls}
-            playbackTimeline={playbackCandles}
-          />
-        </div>
       </div>
     </div>
   );

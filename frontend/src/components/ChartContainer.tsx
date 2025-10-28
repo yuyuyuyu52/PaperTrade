@@ -188,8 +188,8 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
         textColor: "#111"
       },
       grid: {
-        vertLines: { color: GRID_COLOR },
-        horzLines: { color: GRID_COLOR }
+        vertLines: { visible: false },
+        horzLines: { visible: false }
       },
       rightPriceScale: {
         borderVisible: false
