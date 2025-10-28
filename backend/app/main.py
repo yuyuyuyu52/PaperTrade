@@ -12,8 +12,19 @@ from .data_provider import (
     list_instruments,
 )
 from .schemas import Candle, CandleResponse, InstrumentResponse, TimeRangeResponse
+from .models import Drawing
+from .drawings_storage import (
+    init_drawings_db,
+    save_drawing,
+    get_drawings,
+    delete_drawing,
+    delete_all_drawings,
+)
 
 app = FastAPI(title="TradingView Clone API", version="0.1.0")
+
+# Initialize drawings database
+init_drawings_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +95,44 @@ def _validate_symbol(symbol: str) -> str:
     if uppercase not in symbols:
         raise HTTPException(status_code=400, detail=f"Unsupported symbol: {symbol}")
     return uppercase
+
+
+@app.post("/api/drawings")
+def create_drawing(drawing: Drawing) -> Drawing:
+    """Save a new drawing."""
+    if not drawing.id:
+        import uuid
+        drawing.id = str(uuid.uuid4())
+    
+    uppercase_symbol = _validate_symbol(drawing.symbol)
+    drawing.symbol = uppercase_symbol
+    
+    save_drawing(drawing)
+    return drawing
+
+
+@app.get("/api/drawings")
+def list_drawings(symbol: str = Query(..., min_length=1), interval: str = Query(..., min_length=1)) -> List[Drawing]:
+    """Get all drawings for a symbol and interval."""
+    uppercase_symbol = _validate_symbol(symbol)
+    return get_drawings(uppercase_symbol, interval)
+
+
+@app.delete("/api/drawings/{drawing_id}")
+def remove_drawing(drawing_id: str) -> dict:
+    """Delete a drawing by ID."""
+    success = delete_drawing(drawing_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    return {"success": True, "id": drawing_id}
+
+
+@app.delete("/api/drawings")
+def clear_drawings(symbol: str = Query(..., min_length=1), interval: str = Query(..., min_length=1)) -> dict:
+    """Delete all drawings for a symbol and interval."""
+    uppercase_symbol = _validate_symbol(symbol)
+    count = delete_all_drawings(uppercase_symbol, interval)
+    return {"success": True, "deleted": count}
 
 
 @app.websocket("/ws/candles")

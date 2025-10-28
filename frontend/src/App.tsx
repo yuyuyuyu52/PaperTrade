@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChartContainer from "./components/ChartContainer";
+import DrawingToolbar from "./components/DrawingToolbar";
 import { usePlaybackController } from "./hooks/usePlaybackController";
+import { useDrawingManager } from "./hooks/useDrawingManager";
 import { fetchCandles, fetchInstruments, fetchTimeRange } from "./services/api";
 import { subscribeToRealtime } from "./services/websocketClient";
 import { Candle, Instrument, Interval, Mode } from "./types";
@@ -30,12 +32,15 @@ function App() {
   const [playbackCandles, setPlaybackCandles] = useState<Candle[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeTool, setActiveTool] = useState<"line" | "fib" | "rectangle" | "none">("none");
+  const [tempLatestCandle, setTempLatestCandle] = useState<Candle | null>(null);
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const realtimeHistoryLoadingRef = useRef(false);
   const realtimeHistoryRequestedRef = useRef<Set<number>>(new Set());
 
   const playbackController = usePlaybackController(playbackCandles);
+  const drawingManager = useDrawingManager({ symbol: selectedSymbol, interval });
 
   useEffect(() => {
     fetchInstruments()
@@ -69,38 +74,40 @@ function App() {
           if (cancelled) return;
           const sorted = [...result.candles].sort((a, b) => a.time - b.time);
           setRealtimeCandles(sorted);
+          setTempLatestCandle(null);
 
               unsubscribeRef.current = subscribeToRealtime({
                 symbol: selectedSymbol,
                 interval,
                 onCandle: (candle, final) => {
-              setRealtimeCandles((previous: Candle[]) => {
-                if (previous.length === 0) {
-                  return [candle];
-                }
+              if (final) {
+                // final=true: 这是一条完成的 K 线，添加到永久数组
+                setRealtimeCandles((previous: Candle[]) => {
+                  if (previous.length === 0) {
+                    return [candle];
+                  }
 
-                const next = [...previous];
-                const index = next.findIndex((item) => item.time === candle.time);
-                if (index >= 0) {
-                  // 只有当 final=true 时，才更新该 K 线；否则保留现有数据
-                  if (final) {
+                  const next = [...previous];
+                  const index = next.findIndex((item) => item.time === candle.time);
+                  if (index >= 0) {
+                    // 如果已存在则更新
                     next[index] = { ...next[index], ...candle };
+                  } else {
+                    // 新增
+                    next.push(candle);
+                    next.sort((a, b) => a.time - b.time);
+                    if (next.length > REALTIME_MAX_POINTS) {
+                      return next.slice(next.length - REALTIME_MAX_POINTS);
+                    }
                   }
                   return next;
-                }
-
-                // 只有当 final=true 时，才新增 K 线
-                if (!final) {
-                  return previous;
-                }
-
-                next.push(candle);
-                next.sort((a, b) => a.time - b.time);
-                    if (next.length > REALTIME_MAX_POINTS) {
-                     return next.slice(next.length - REALTIME_MAX_POINTS);
-                   }
-                   return next;
-              });
+                });
+                // 清除临时 K 线
+                setTempLatestCandle(null);
+              } else {
+                // final=false: 这是实时更新中的未完成 K 线，只显示在临时位置
+                setTempLatestCandle(candle);
+              }
             }
           });
         } else {
@@ -111,6 +118,7 @@ function App() {
           const result = await fetchCandles({ symbol: selectedSymbol, interval, start: earliest, end: latest, limit: 5000 });
           if (cancelled) return;
           setPlaybackCandles(result.candles);
+          setTempLatestCandle(null);
         }
       } catch (loadError) {
         console.error(loadError);
@@ -146,10 +154,19 @@ function App() {
 
   const activeCandles = useMemo(() => {
     if (mode === "realtime") {
+      // 组合永久 K 线和临时的未完成 K 线
+      if (tempLatestCandle) {
+        // 检查临时 K 线是否已在数组中（不应该有，但保险起见）
+        const existingIndex = realtimeCandles.findIndex((c) => c.time === tempLatestCandle.time);
+        if (existingIndex >= 0) {
+          return realtimeCandles;
+        }
+        return [...realtimeCandles, tempLatestCandle];
+      }
       return realtimeCandles;
     }
     return playbackController.visible;
-  }, [mode, realtimeCandles, playbackController.visible]);
+  }, [mode, realtimeCandles, tempLatestCandle, playbackController.visible]);
 
   const loadMoreRealtimeHistory = useCallback(async (earliestTime: number) => {
     if (mode !== "realtime") {
@@ -262,12 +279,23 @@ function App() {
         )}
       </nav>
       <div className="chart-wrapper">
+        <div className="chart-controls">
+          <DrawingToolbar
+            activeTool={activeTool}
+            onToolChange={setActiveTool}
+            onClearDrawings={() => drawingManager.clearAllDrawings().catch(console.error)}
+          />
+        </div>
         {activeCandles.length > 0 && (
           <ChartContainer
             candles={activeCandles}
             mode={mode}
             interval={interval}
             onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
+            activeTool={activeTool}
+            drawings={drawingManager.drawings}
+            onAddDrawing={drawingManager.addDrawing}
+            onRemoveDrawing={drawingManager.removeDrawing}
           />
         )}
         {loading && <div className="status-layer loading">加载中...</div>}

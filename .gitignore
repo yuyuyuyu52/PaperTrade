@@ -39,3 +39,4 @@ frontend/.vite/
 *.env
 .env.local
 .env.*
+*.db

@@ -10,12 +10,18 @@ import {
   createChart
 } from "lightweight-charts";
 import { Candle, Interval, Mode } from "../types";
+import { DrawingData } from "../services/drawingApi";
+import { ChartDrawingManager } from "../utils/ChartDrawingManager";
 
 interface ChartContainerProps {
   candles: Candle[];
   mode: Mode;
   interval: Interval;
   onRequestHistory?: (earliestTime: number) => Promise<void> | void;
+  activeTool?: "line" | "fib" | "rectangle" | "none";
+  drawings?: DrawingData[];
+  onAddDrawing?: (drawing: DrawingData) => Promise<void>;
+  onRemoveDrawing?: (drawingId: string) => Promise<void>;
 }
 
 const CHART_BG = "#f5f5f5";
@@ -92,10 +98,20 @@ function toUnixTime(value: BusinessDay | UTCTimestamp | string): number {
   return Math.floor(Date.UTC(value.year, value.month - 1, value.day) / 1000);
 }
 
-export function ChartContainer({ candles, mode, interval, onRequestHistory }: ChartContainerProps) {
+export function ChartContainer({ 
+  candles, 
+  mode, 
+  interval, 
+  onRequestHistory,
+  activeTool,
+  drawings,
+  onAddDrawing,
+  onRemoveDrawing,
+}: ChartContainerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const drawingManagerRef = useRef<ChartDrawingManager | null>(null);
   const historyLoadingRef = useRef(false);
   const requestedEarliestRef = useRef<Set<number>>(new Set());
   const stayAtRightRef = useRef(true);
@@ -425,6 +441,46 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
     }
   }, [mode]);
 
+  // Initialize drawing manager
+  useEffect(() => {
+    if (!chartRef.current || !seriesRef.current) {
+      return;
+    }
+
+    const manager = new ChartDrawingManager(chartRef.current, seriesRef.current, interval, candles);
+    drawingManagerRef.current = manager;
+
+    if (onAddDrawing) {
+      manager.setOnDrawingComplete(onAddDrawing);
+    }
+
+    if (drawings && drawings.length > 0) {
+      manager.loadDrawings(drawings);
+    }
+
+    if (activeTool) {
+      manager.setTool(activeTool);
+    }
+
+    return () => {
+      manager.destroy();
+    };
+  }, [interval, candles, onAddDrawing]);
+
+  // Update drawing tool
+  useEffect(() => {
+    if (drawingManagerRef.current && activeTool) {
+      drawingManagerRef.current.setTool(activeTool);
+    }
+  }, [activeTool]);
+
+  // Update drawings
+  useEffect(() => {
+    if (drawingManagerRef.current && drawings) {
+      drawingManagerRef.current.loadDrawings(drawings);
+    }
+  }, [drawings]);
+
   useEffect(() => {
     if (!chartRef.current) {
       return;
@@ -533,7 +589,7 @@ export function ChartContainer({ candles, mode, interval, onRequestHistory }: Ch
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+      <div ref={containerRef} style={{ width: "100%", height: "100%" }} data-chart-container />
       {hoverOverlay}
       {!isAutoFollow && (
         <button
