@@ -1,0 +1,134 @@
+.quick-trade-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  background: #fff;
+  border-right: 1px solid #e0e0e0;
+  flex-shrink: 0;
+  min-width: fit-content;
+}
+
+.price-display {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  min-width: 200px;
+}
+
+.symbol {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #333;
+  min-width: 40px;
+}
+
+.price {
+  font-size: 1.25rem;
+  font-weight: 700;
+  transition: color 0.3s ease;
+}
+
+.price-change {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  animation: fadeIn 0.2s ease, fadeOut 0.8s ease 0.2s forwards;
+}
+
+.price-change.up {
+  background: rgba(34, 170, 106, 0.1);
+  color: #22aa6a;
+}
+
+.price-change.down {
+  background: rgba(255, 68, 68, 0.1);
+  color: #ff4444;
+}
+
+.trade-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 50px;
+  flex-shrink: 0;
+}
+
+.buy-btn {
+  background: #22aa6a;
+  color: #fff;
+}
+
+.buy-btn:hover:not(:disabled) {
+  background: #1a8a52;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(34, 170, 106, 0.3);
+}
+
+.buy-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.sell-btn {
+  background: #ff4444;
+  color: #fff;
+}
+
+.sell-btn:hover:not(:disabled) {
+  background: #cc3333;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(255, 68, 68, 0.3);
+}
+
+.sell-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.trade-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quantity-input {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  width: 90px;
+  text-align: center;
+  transition: border-color 0.2s ease;
+}
+
+.quantity-input:focus {
+  outline: none;
+  border-color: #22aa6a;
+  box-shadow: 0 0 0 2px rgba(34, 170, 106, 0.1);
+}
+
+.quantity-input:disabled {
+  background: #f5f5f5;
+  cursor: not-allowed;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeOut {
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}

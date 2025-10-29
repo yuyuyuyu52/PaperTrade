@@ -66,24 +66,33 @@
   flex-direction: column;
 }
 
+.top-control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  flex-shrink: 0;
+  min-height: 50px;
+}
+
+.drawing-tools-container {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  margin-left: auto;
+  gap: 1rem;
+}
+
 .chart-content {
   flex: 1;
   overflow: hidden;
   transition: flex 0.3s ease;
+  position: relative;
 }
 
 .chart-content.with-trading-panel {
   flex: 0.6;
-}
-
-.chart-controls {
-  display: flex;
-  align-items: center;
-  padding: 0.5rem 1rem;
-  background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0;
-  flex-shrink: 0;
-  gap: 1rem;
 }
 
 .playback-controls {

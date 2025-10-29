@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChartContainer from "./components/ChartContainer";
 import DrawingToolbar from "./components/DrawingToolbar";
+import QuickTradeBar from "./components/QuickTradeBar";
 import TradingPanel from "./components/TradingPanel";
 import { usePlaybackController } from "./hooks/usePlaybackController";
 import { useDrawingManager } from "./hooks/useDrawingManager";
@@ -281,12 +282,23 @@ function App() {
         )}
       </nav>
       <div className="chart-wrapper">
-        <div className="chart-controls">
-          <DrawingToolbar
-            activeTool={activeTool}
-            onToolChange={setActiveTool}
-            onClearDrawings={() => drawingManager.clearAllDrawings().catch(console.error)}
-          />
+        {/* Top Control Bar: Quick Trade (Left) + Drawing Tools (Right) */}
+        <div className="top-control-bar">
+          {activeCandles.length > 0 && (
+            <QuickTradeBar
+              symbol={selectedSymbol}
+              interval={interval}
+              currentPrice={activeCandles[activeCandles.length - 1]?.close ?? 0}
+              mode={mode}
+            />
+          )}
+          <div className="drawing-tools-container">
+            <DrawingToolbar
+              activeTool={activeTool}
+              onToolChange={setActiveTool}
+              onClearDrawings={() => drawingManager.clearAllDrawings().catch(console.error)}
+            />
+          </div>
         </div>
         <div className={`chart-content ${tradingPanelExpanded ? "with-trading-panel" : ""}`}>
           {activeCandles.length > 0 && (
