@@ -24,9 +24,8 @@ export function QuickTradeBar({
 }: QuickTradeBarProps) {
   const [quantity, setQuantity] = useState<string>("1");
   const [loading, setLoading] = useState(false);
-  const [priceChange, setPriceChange] = useState<{ value: number; percent: number } | null>(null);
+  const [priceColor, setPriceColor] = useState<string>("#22aa6a"); // 默认绿色
   const previousPriceRef = useRef<number>(currentPrice);
-
   const ref = useRef<HTMLDivElement>(null);
 
   // 记忆数量输入
@@ -37,18 +36,14 @@ export function QuickTradeBar({
     }
   }, []);
 
-  // 追踪价格变化
+  // 追踪价格变化，更新颜色
   useEffect(() => {
     const prev = previousPriceRef.current;
     if (prev && prev !== currentPrice) {
       const change = currentPrice - prev;
-      const percent = (change / prev) * 100;
-      setPriceChange({ value: change, percent });
+      // 如果价格上涨，显示绿色；下跌显示红色
+      setPriceColor(change >= 0 ? "#22aa6a" : "#ff4444");
       previousPriceRef.current = currentPrice;
-
-      // 1秒后淡出价格变化提示
-      const timer = setTimeout(() => setPriceChange(null), 1000);
-      return () => clearTimeout(timer);
     }
   }, [currentPrice]);
 
@@ -101,8 +96,7 @@ export function QuickTradeBar({
 
   // 获取价格颜色（绿涨红跌）
   const getPriceColor = () => {
-    if (!priceChange) return currentPrice >= 0 ? "#22aa6a" : "#ff4444";
-    return priceChange.value >= 0 ? "#22aa6a" : "#ff4444";
+    return priceColor;
   };
 
   return (
@@ -113,15 +107,6 @@ export function QuickTradeBar({
         <span className="price" style={{ color: getPriceColor() }}>
           ${currentPrice.toFixed(2)}
         </span>
-        {priceChange && (
-          <span
-            className={`price-change ${priceChange.value >= 0 ? "up" : "down"}`}
-          >
-            {priceChange.value >= 0 ? "+" : ""}
-            {priceChange.value.toFixed(2)}
-            ({priceChange.percent.toFixed(2)}%)
-          </span>
-        )}
       </div>
 
       {/* 买按钮 */}
