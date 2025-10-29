@@ -7,6 +7,8 @@ export interface Position {
   quantity: number;
   entry_price: number;
   entry_time: number;
+  take_profit_price?: number | null;
+  stop_loss_price?: number | null;
 }
 
 export interface ClosedPosition {

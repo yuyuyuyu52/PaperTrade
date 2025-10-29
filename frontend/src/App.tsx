@@ -6,8 +6,10 @@ import TradingPanel from "./components/TradingPanel";
 import { usePlaybackController } from "./hooks/usePlaybackController";
 import { useDrawingManager } from "./hooks/useDrawingManager";
 import { fetchCandles, fetchInstruments, fetchTimeRange } from "./services/api";
+import { getAccount } from "./services/tradingApi";
 import { subscribeToRealtime } from "./services/websocketClient";
 import { Candle, Instrument, Interval, Mode } from "./types";
+import { Order, Position } from "./types/trading";
 import "./App.css";
 
 const DEFAULT_INTERVAL: Interval = "1m";
@@ -37,6 +39,8 @@ function App() {
   const [activeTool, setActiveTool] = useState<"line" | "fib" | "rectangle" | "none">("none");
   const [tempLatestCandle, setTempLatestCandle] = useState<Candle | null>(null);
   const [tradingPanelExpanded, setTradingPanelExpanded] = useState(false);
+  const [accountPositions, setAccountPositions] = useState<Position[]>([]);
+  const [openOrders, setOpenOrders] = useState<Order[]>([]);
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const realtimeHistoryLoadingRef = useRef(false);
@@ -58,6 +62,39 @@ function App() {
       })
       .catch(() => setError("无法加载品种列表"));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tradingMode = mode === "realtime" ? "realtime" : "playback";
+
+    setAccountPositions([]);
+    setOpenOrders([]);
+
+    const fetchAccountSnapshot = async () => {
+      try {
+        const account = await getAccount(tradingMode, selectedSymbol, interval);
+        if (cancelled) {
+          return;
+        }
+        setAccountPositions(account.positions ?? []);
+        setOpenOrders(account.orders ?? []);
+      } catch (snapshotError) {
+        if (!cancelled) {
+          console.error("[AccountSnapshot] Failed to load account data", snapshotError);
+          setAccountPositions([]);
+          setOpenOrders([]);
+        }
+      }
+    };
+
+    fetchAccountSnapshot();
+    const timer = window.setInterval(fetchAccountSnapshot, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [mode, selectedSymbol, interval]);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,6 +348,8 @@ function App() {
               drawings={drawingManager.drawings}
               onAddDrawing={drawingManager.addDrawing}
               onRemoveDrawing={drawingManager.removeDrawing}
+              positions={accountPositions}
+              orders={openOrders}
             />
           )}
           {loading && <div className="status-layer loading">加载中...</div>}

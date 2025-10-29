@@ -3,13 +3,18 @@ import {
   BusinessDay,
   CandlestickData,
   IChartApi,
+  IPriceLine,
   ISeriesApi,
+  LineStyle,
+  LineWidth,
   LogicalRange,
   MouseEventParams,
+  PriceLineOptions,
   UTCTimestamp,
   createChart
 } from "lightweight-charts";
 import { Candle, Interval, Mode } from "../types";
+import { Order, Position } from "../types/trading";
 import { DrawingData } from "../services/drawingApi";
 import { ChartDrawingManager } from "../utils/ChartDrawingManager";
 
@@ -22,12 +27,21 @@ interface ChartContainerProps {
   drawings?: DrawingData[];
   onAddDrawing?: (drawing: DrawingData) => Promise<void>;
   onRemoveDrawing?: (drawingId: string) => Promise<void>;
+  positions?: Position[];
+  orders?: Order[];
 }
 
 const CHART_BG = "#f5f5f5";
 const GRID_COLOR = "#e0e0e0";
 const UP_COLOR = "#22aa6a";
 const DOWN_COLOR = "#000000";
+const POSITION_LONG_LINE_COLOR = "#22aa6a";
+const POSITION_SHORT_LINE_COLOR = "#d64a4a";
+const LIMIT_ORDER_LINE_COLOR = "#2a66d9";
+const TAKE_PROFIT_LINE_COLOR = "#22aa6a";
+const STOP_LOSS_LINE_COLOR = "#ff4444";
+const QUANTITY_DISPLAY_THRESHOLD = 1;
+const POSITION_QUANTITY_EPSILON = 1e-10;
 const DEFAULT_RIGHT_OFFSET = 3;
 const DEFAULT_VISIBLE_BARS = 240;
 const INITIAL_BAR_SPACING = 4.5;
@@ -48,6 +62,72 @@ const INTERVAL_STEP_SECONDS: Record<Interval, number> = {
   "4h": 14400,
   "1d": 86400
 };
+
+interface ClassifiedLimitOrderLine {
+  key: string;
+  options: PriceLineOptions;
+}
+
+function formatQuantity(quantity: number): string {
+  const abs = Math.abs(quantity);
+  const decimals = abs >= QUANTITY_DISPLAY_THRESHOLD ? 2 : 4;
+  return abs.toFixed(decimals);
+}
+
+function buildPriceLineOptions(
+  price: number,
+  color: string,
+  title: string,
+  lineStyle: LineStyle = LineStyle.Solid,
+  lineWidth: LineWidth = 1
+): PriceLineOptions {
+  return {
+    price,
+    color,
+    lineVisible: true,
+    lineWidth,
+    lineStyle,
+    axisLabelVisible: true,
+    axisLabelColor: color,
+    axisLabelTextColor: "#111",
+    title
+  };
+}
+
+function classifyLimitOrder(order: Order, position?: Position | null): ClassifiedLimitOrderLine | null {
+  if (order.type !== "limit" || order.status !== "open" || typeof order.price !== "number") {
+    return null;
+  }
+
+  const quantityLabel = formatQuantity(order.quantity);
+  const baseOptions = buildPriceLineOptions(
+    order.price,
+    LIMIT_ORDER_LINE_COLOR,
+    `${order.direction === "buy" ? "限价买入" : "限价卖出"} ${quantityLabel}`,
+    LineStyle.Dotted
+  );
+
+  if (!position || Math.abs(position.quantity) < POSITION_QUANTITY_EPSILON) {
+    return { key: `order:${order.id}`, options: baseOptions };
+  }
+
+  const isLong = position.quantity > 0;
+  const isOppositeDirection = (isLong && order.direction === "sell") || (!isLong && order.direction === "buy");
+
+  if (!isOppositeDirection) {
+    return { key: `order:${order.id}`, options: baseOptions };
+  }
+
+  const entryPrice = position.entry_price;
+  const isTakeProfit = isLong ? order.price >= entryPrice : order.price <= entryPrice;
+  const titlePrefix = isTakeProfit ? "止盈" : "止损";
+  const color = isTakeProfit ? TAKE_PROFIT_LINE_COLOR : STOP_LOSS_LINE_COLOR;
+
+  return {
+    key: `order:${order.id}`,
+    options: buildPriceLineOptions(order.price, color, `${titlePrefix} ${quantityLabel}`, LineStyle.Dashed)
+  };
+}
 
 function pad(value: number): string {
   return value.toString().padStart(2, "0");
@@ -107,11 +187,14 @@ export function ChartContainer({
   drawings,
   onAddDrawing,
   onRemoveDrawing,
+  positions,
+  orders,
 }: ChartContainerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const drawingManagerRef = useRef<ChartDrawingManager | null>(null);
+  const priceLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const historyLoadingRef = useRef(false);
   const requestedEarliestRef = useRef<Set<number>>(new Set());
   const stayAtRightRef = useRef(true);
@@ -557,6 +640,114 @@ export function ChartContainer({
       timeScale.unsubscribeVisibleLogicalRangeChange(handleRangeChange);
     };
   }, [candles, mode, onRequestHistory]);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) {
+      return;
+    }
+
+    const activeKeys = new Set<string>();
+    const lines = priceLinesRef.current;
+
+    const ensureLine = (key: string, options: PriceLineOptions) => {
+      activeKeys.add(key);
+      const existing = lines.get(key);
+      if (existing) {
+        existing.applyOptions(options);
+      } else {
+        const created = series.createPriceLine(options);
+        lines.set(key, created);
+      }
+    };
+
+    const positionMap = new Map<string, Position>();
+
+    (positions ?? []).forEach((position) => {
+      if (Math.abs(position.quantity) < POSITION_QUANTITY_EPSILON) {
+        return;
+      }
+
+      const keyBase = `position:${position.symbol}:${position.entry_time}`;
+      const quantityLabel = formatQuantity(Math.abs(position.quantity));
+      const directionLabel = position.quantity > 0 ? "多仓" : "空仓";
+
+      positionMap.set(position.symbol, position);
+
+      ensureLine(
+        keyBase,
+        buildPriceLineOptions(
+          position.entry_price,
+          position.quantity > 0 ? POSITION_LONG_LINE_COLOR : POSITION_SHORT_LINE_COLOR,
+          `${directionLabel} ${quantityLabel}`,
+          LineStyle.Solid,
+          2
+        )
+      );
+
+      if (typeof position.take_profit_price === "number") {
+        ensureLine(
+          `${keyBase}:tp`,
+          buildPriceLineOptions(
+            position.take_profit_price,
+            TAKE_PROFIT_LINE_COLOR,
+            `止盈 ${quantityLabel}`,
+            LineStyle.Dashed
+          )
+        );
+      }
+
+      if (typeof position.stop_loss_price === "number") {
+        ensureLine(
+          `${keyBase}:sl`,
+          buildPriceLineOptions(
+            position.stop_loss_price,
+            STOP_LOSS_LINE_COLOR,
+            `止损 ${quantityLabel}`,
+            LineStyle.Dashed
+          )
+        );
+      }
+    });
+
+    (orders ?? [])
+      .filter((order) => order.status === "open" && order.type === "limit" && typeof order.price === "number")
+      .forEach((order) => {
+        const classification = classifyLimitOrder(order, positionMap.get(order.symbol));
+        if (classification) {
+          ensureLine(classification.key, classification.options);
+        }
+      });
+
+    for (const [key, line] of Array.from(lines.entries())) {
+      if (!activeKeys.has(key)) {
+        try {
+          series.removePriceLine(line);
+        } catch (removeError) {
+          console.warn("[ChartContainer] Failed to remove price line", removeError);
+        }
+        lines.delete(key);
+      }
+    }
+  }, [positions, orders]);
+
+  useEffect(() => {
+    return () => {
+      const series = seriesRef.current;
+      if (!series) {
+        priceLinesRef.current.clear();
+        return;
+      }
+      for (const [, line] of priceLinesRef.current) {
+        try {
+          series.removePriceLine(line);
+        } catch {
+          // ignore removal failures during teardown
+        }
+      }
+      priceLinesRef.current.clear();
+    };
+  }, []);
 
   const hoverInfo = hoveredCandle;
   let hoverOverlay: JSX.Element | null = null;
