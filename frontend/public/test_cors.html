@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <h1>CORS 测试</h1>
+    <button onclick="test()">测试</button>
+    <pre id="log"></pre>
+    <script>
+        const log = (msg) => {
+            const el = document.getElementById('log');
+            el.innerText += msg + '\n';
+            console.log(msg);
+        };
+        
+        async function test() {
+            try {
+                log('测试 1: 获取账户信息...');
+                const acc = await axios.get('http://localhost:8000/api/accounts/realtime', {
+                    params: { symbol: 'ETH', interval: '1m' }
+                });
+                log('账户: ' + JSON.stringify(acc.data.balance));
+                
+                log('\n测试 2: 下单...');
+                const order = await axios.post('http://localhost:8000/api/orders', {}, {
+                    params: {
+                        mode: 'realtime',
+                        symbol: 'ETH',
+                        interval: '1m',
+                        direction: 'sell',
+                        type: 'market',
+                        quantity: 0.1,
+                        current_price: 3977
+                    }
+                });
+                log('订单: ' + JSON.stringify(order.data.id));
+            } catch (e) {
+                log('ERROR: ' + (e.response?.data?.detail || e.message));
+            }
+        }
+    </script>
+</body>
+</html>

@@ -66,6 +66,16 @@
   flex-direction: column;
 }
 
+.chart-content {
+  flex: 1;
+  overflow: hidden;
+  transition: flex 0.3s ease;
+}
+
+.chart-content.with-trading-panel {
+  flex: 0.6;
+}
+
 .chart-controls {
   display: flex;
   align-items: center;

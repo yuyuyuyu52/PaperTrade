@@ -20,11 +20,19 @@ from .drawings_storage import (
     delete_drawing,
     delete_all_drawings,
 )
+from .trading_storage import (
+    init_trading_db,
+    get_or_create_account,
+    get_account_stats,
+    get_account_id,
+)
+from .trading_engine import get_trading_engine
 
 app = FastAPI(title="TradingView Clone API", version="0.1.0")
 
-# Initialize drawings database
+# Initialize databases
 init_drawings_db()
+init_trading_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -163,3 +171,274 @@ async def stream_candles(websocket: WebSocket, symbol: str, interval: str) -> No
         return
     except Exception:
         await websocket.close(code=1011, reason="Internal server error")
+
+
+# ============ Trading API Endpoints ============
+
+class OrderRequest:
+    def __init__(self, direction: str, type: str, quantity: float, price: Optional[float] = None):
+        self.direction = direction
+        self.type = type
+        self.quantity = quantity
+        self.price = price
+
+
+@app.get("/api/accounts/{mode}")
+def get_account(
+    mode: str,
+    symbol: str = Query(..., description="Symbol"),
+    interval: str = Query(..., description="Interval"),
+):
+    """Get account information."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        stats = get_account_stats(account_id)
+        
+        return {
+            "account_id": account_id,
+            "mode": account.mode,
+            "symbol": account.symbol,
+            "interval": account.interval,
+            "initial_balance": account.initial_balance,
+            "balance": account.balance,
+            "positions": [
+                {
+                    "symbol": p.symbol,
+                    "quantity": p.quantity,
+                    "entry_price": p.entry_price,
+                    "entry_time": p.entry_time,
+                }
+                for p in account.positions
+            ],
+            "orders": [
+                {
+                    "id": o.id,
+                    "symbol": o.symbol,
+                    "direction": o.direction,
+                    "type": o.type,
+                    "quantity": o.quantity,
+                    "price": o.price,
+                    "create_time": o.create_time,
+                    "filled_quantity": o.filled_quantity,
+                    "filled_price": o.filled_price,
+                    "status": o.status,
+                }
+                for o in account.orders
+            ],
+            "stats": {
+                "total_trades": stats.total_trades if stats else 0,
+                "winning_trades": stats.winning_trades if stats else 0,
+                "losing_trades": stats.losing_trades if stats else 0,
+                "win_rate": stats.win_rate if stats else 0,
+                "profit_factor": stats.profit_factor if stats else 0,
+                "max_drawdown": stats.max_drawdown if stats else 0,
+                "sharpe_ratio": stats.sharpe_ratio if stats else 0,
+                "cagr": stats.cagr if stats else 0,
+                "cumulative_return": stats.cumulative_return if stats else 0,
+            } if stats else {},
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/orders")
+def place_order(
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+    direction: str = Query(..., description="buy or sell"),
+    order_type: str = Query(..., description="market or limit", alias="type"),
+    quantity: float = Query(...),
+    price: Optional[float] = Query(None),
+    current_price: float = Query(...),
+):
+    """Place an order."""
+    try:
+        print(f"[DEBUG] POST /api/orders received: mode={mode}, symbol={symbol}, interval={interval}, direction={direction}, type={order_type}, quantity={quantity}, price={price}, current_price={current_price}")
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        engine = get_trading_engine(account_id, account)
+        
+        if order_type == "market":
+            order = engine.place_market_order(uppercase_symbol, direction, quantity, current_price)
+        elif order_type == "limit":
+            if price is None:
+                raise ValueError("Price required for limit orders")
+            order = engine.place_limit_order(uppercase_symbol, direction, quantity, price)
+        else:
+            raise ValueError("Invalid order type")
+        
+        return {
+            "id": order.id,
+            "symbol": order.symbol,
+            "direction": order.direction,
+            "type": order.type,
+            "quantity": order.quantity,
+            "price": order.price,
+            "create_time": order.create_time,
+            "filled_quantity": order.filled_quantity,
+            "filled_price": order.filled_price,
+            "status": order.status,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/orders")
+def list_orders(
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+):
+    """List orders."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        
+        return [
+            {
+                "id": o.id,
+                "symbol": o.symbol,
+                "direction": o.direction,
+                "type": o.type,
+                "quantity": o.quantity,
+                "price": o.price,
+                "create_time": o.create_time,
+                "filled_quantity": o.filled_quantity,
+                "filled_price": o.filled_price,
+                "status": o.status,
+            }
+            for o in account.orders
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/orders/{order_id}")
+def cancel_order(
+    order_id: str,
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+):
+    """Cancel an order."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        engine = get_trading_engine(account_id, account)
+        
+        if engine.cancel_order(order_id):
+            return {"success": True, "id": order_id}
+        else:
+            raise HTTPException(status_code=404, detail="Order not found or already filled")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/trades")
+def list_trades(
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+):
+    """List trades."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        
+        return [
+            {
+                "id": t.id,
+                "symbol": t.symbol,
+                "direction": t.direction,
+                "quantity": t.quantity,
+                "price": t.price,
+                "timestamp": t.timestamp,
+                "commission": t.commission,
+            }
+            for t in account.trades
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/closed-positions")
+def list_closed_positions(
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+):
+    """List closed positions (completed trades from entry to exit)."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        
+        return [
+            {
+                "id": cp.id,
+                "symbol": cp.symbol,
+                "direction": cp.direction,
+                "quantity": cp.quantity,
+                "entry_price": cp.entry_price,
+                "entry_time": cp.entry_time,
+                "exit_price": cp.exit_price,
+                "exit_time": cp.exit_time,
+                "profit_loss": cp.profit_loss,
+                "commission": cp.commission,
+                "days_held": cp.days_held(),
+                "return_pct": cp.return_pct(),
+            }
+            for cp in account.closed_positions
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/account-stats/{mode}")
+def get_stats(
+    mode: str,
+    symbol: str = Query(...),
+    interval: str = Query(...),
+):
+    """Get account statistics."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        engine = get_trading_engine(account_id, account)
+        stats = engine.calculate_stats()
+        
+        return {
+            "total_trades": stats.total_trades,
+            "winning_trades": stats.winning_trades,
+            "losing_trades": stats.losing_trades,
+            "win_rate": stats.win_rate,
+            "total_profit": stats.total_profit,
+            "total_loss": stats.total_loss,
+            "profit_factor": stats.profit_factor,
+            "expectancy": stats.expectancy,
+            "max_drawdown": stats.max_drawdown,
+            "max_drawdown_pct": stats.max_drawdown_pct,
+            "sharpe_ratio": stats.sharpe_ratio,
+            "cagr": stats.cagr,
+            "cumulative_return": stats.cumulative_return,
+            "total_return": stats.total_return,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

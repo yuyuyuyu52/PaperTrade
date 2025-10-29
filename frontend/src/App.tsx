@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChartContainer from "./components/ChartContainer";
 import DrawingToolbar from "./components/DrawingToolbar";
+import TradingPanel from "./components/TradingPanel";
 import { usePlaybackController } from "./hooks/usePlaybackController";
 import { useDrawingManager } from "./hooks/useDrawingManager";
 import { fetchCandles, fetchInstruments, fetchTimeRange } from "./services/api";
@@ -34,6 +35,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<"line" | "fib" | "rectangle" | "none">("none");
   const [tempLatestCandle, setTempLatestCandle] = useState<Candle | null>(null);
+  const [tradingPanelExpanded, setTradingPanelExpanded] = useState(false);
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const realtimeHistoryLoadingRef = useRef(false);
@@ -286,22 +288,34 @@ function App() {
             onClearDrawings={() => drawingManager.clearAllDrawings().catch(console.error)}
           />
         </div>
+        <div className={`chart-content ${tradingPanelExpanded ? "with-trading-panel" : ""}`}>
+          {activeCandles.length > 0 && (
+            <ChartContainer
+              candles={activeCandles}
+              mode={mode}
+              interval={interval}
+              onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
+              activeTool={activeTool}
+              drawings={drawingManager.drawings}
+              onAddDrawing={drawingManager.addDrawing}
+              onRemoveDrawing={drawingManager.removeDrawing}
+            />
+          )}
+          {loading && <div className="status-layer loading">加载中...</div>}
+          {error && <div className="status-layer error">{error}</div>}
+          {!loading && !error && activeCandles.length === 0 && (
+            <div className="status-layer placeholder">暂无数据</div>
+          )}
+        </div>
         {activeCandles.length > 0 && (
-          <ChartContainer
-            candles={activeCandles}
+          <TradingPanel
             mode={mode}
+            symbol={selectedSymbol}
             interval={interval}
-            onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
-            activeTool={activeTool}
-            drawings={drawingManager.drawings}
-            onAddDrawing={drawingManager.addDrawing}
-            onRemoveDrawing={drawingManager.removeDrawing}
+            currentPrice={activeCandles[activeCandles.length - 1]?.close ?? 0}
+            isExpanded={tradingPanelExpanded}
+            onToggleExpand={() => setTradingPanelExpanded(!tradingPanelExpanded)}
           />
-        )}
-        {loading && <div className="status-layer loading">加载中...</div>}
-        {error && <div className="status-layer error">{error}</div>}
-        {!loading && !error && activeCandles.length === 0 && (
-          <div className="status-layer placeholder">暂无数据</div>
         )}
       </div>
     </div>
