@@ -222,9 +222,7 @@ export function TradingPanel({
                   {account.positions
                     .filter(pos => Math.abs(pos.quantity) > 1e-10)
                     .map((pos) => {
-                    const pnl = pos.quantity > 0
-                      ? pos.quantity * (currentPrice - pos.entry_price)
-                      : pos.quantity * (pos.entry_price - currentPrice);
+                    const pnl = (currentPrice - pos.entry_price) * pos.quantity;
                     const pnlPct = (pnl / (Math.abs(pos.quantity) * pos.entry_price)) * 100;
                     return (
                       <tr key={pos.symbol}>
@@ -243,6 +241,7 @@ export function TradingPanel({
                           <button
                             className="cancel-btn"
                             onClick={() => {
+                              console.info('[TP/SL] open clicked for', pos.symbol);
                               setTpslSymbol(pos.symbol);
                               setTpInput(pos.take_profit_price != null ? String(pos.take_profit_price) : "");
                               setSlInput(pos.stop_loss_price != null ? String(pos.stop_loss_price) : "");
