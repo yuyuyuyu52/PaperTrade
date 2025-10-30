@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
 from .config import INTERVAL_MINUTES
 from .data_provider import (
@@ -29,6 +30,7 @@ from .trading_storage import (
 from .trading_engine import get_trading_engine
 
 app = FastAPI(title="TradingView Clone API", version="0.1.0")
+logger = logging.getLogger("ws")
 
 # Initialize databases
 init_drawings_db()
