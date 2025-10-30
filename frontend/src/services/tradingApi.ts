@@ -107,3 +107,15 @@ export async function getAccountStats(mode: "realtime" | "playback", symbol: str
   });
   return data;
 }
+
+export async function closePosition(
+  mode: "realtime" | "playback",
+  symbol: string,
+  interval: string,
+  quantity: number,
+  currentPrice: number
+): Promise<Order> {
+  const direction: "buy" | "sell" = quantity > 0 ? "sell" : "buy";
+  const qty = Math.abs(quantity);
+  return placeOrder(mode, symbol.toUpperCase(), interval, direction, "market", qty, currentPrice);
+}

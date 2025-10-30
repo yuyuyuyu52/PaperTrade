@@ -12,7 +12,8 @@ import {
   cancelOrder,
   listTrades,
   listClosedPositions,
-  getAccountStats
+  getAccountStats,
+  closePosition,
 } from "../services/tradingApi";
 import "./TradingPanel.css";
 
@@ -131,6 +132,17 @@ export function TradingPanel({
     }
   };
 
+  // Handle close position (market)
+  const handleClosePosition = async (posQty: number) => {
+    try {
+      const tradingMode = mode === "realtime" ? "realtime" : "playback";
+      await closePosition(tradingMode, symbol, interval, posQty, currentPrice);
+      await refreshAccount();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   if (!account) {
     return (
       <div className="trading-panel trading-panel-collapsed">
@@ -197,6 +209,7 @@ export function TradingPanel({
                     <th>当前价</th>
                     <th>浮动盈亏</th>
                     <th>盈亏%</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -217,6 +230,11 @@ export function TradingPanel({
                         <td>${currentPrice.toFixed(2)}</td>
                         <td className={pnl >= 0 ? "gain" : "loss"}>${pnl.toFixed(2)}</td>
                         <td className={pnlPct >= 0 ? "gain" : "loss"}>{pnlPct.toFixed(2)}%</td>
+                        <td>
+                          <button className="cancel-btn" onClick={() => handleClosePosition(pos.quantity)}>
+                            平仓
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
