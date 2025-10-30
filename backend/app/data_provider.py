@@ -72,7 +72,7 @@ class _StreamState:
                     await _broadcast(self, {"candle": candle, "final": True})
 
                 stream_url = f"{BINANCE_WS_URL}/{self.binance_symbol.lower()}@kline_{self.interval}"
-                async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20) as ws:
+                async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20, open_timeout=30) as ws:
                     logger.info("Connected Binance stream %s %s", self.symbol, self.interval)
                     backoff = 1.0
                     async for message in ws:
@@ -80,8 +80,8 @@ class _StreamState:
             except asyncio.CancelledError:
                 logger.info("Binance stream cancelled for %s %s", self.symbol, self.interval)
                 raise
-            except (ConnectionClosedError, ConnectionClosedOK):
-                logger.warning("Binance stream closed for %s %s", self.symbol, self.interval)
+            except (ConnectionClosedError, ConnectionClosedOK, TimeoutError):
+                logger.warning("Binance stream closed/timeout for %s %s", self.symbol, self.interval)
             except Exception as exc:  # pylint: disable=broad-except
                 logger.exception("Binance stream error for %s %s", self.symbol, self.interval)
                 await asyncio.sleep(backoff)
