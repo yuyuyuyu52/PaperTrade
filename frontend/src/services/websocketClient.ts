@@ -11,8 +11,10 @@ export interface RealtimeSubscriptionOptions {
 
 export function subscribeToRealtime(options: RealtimeSubscriptionOptions): () => void {
   const { symbol, interval, onOpen, onClose, onError, onCandle } = options;
+  const isDev = import.meta.env.DEV;
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const socketUrl = `${protocol}://${window.location.host}/ws/candles?symbol=${symbol}&interval=${interval}`;
+  const host = isDev ? "localhost:8000" : window.location.host;
+  const socketUrl = `${protocol}://${host}/ws/candles?symbol=${symbol}&interval=${interval}`;
   const socket = new WebSocket(socketUrl);
 
   socket.onopen = () => onOpen?.();
