@@ -12,6 +12,8 @@ class Position:
     quantity: float  # 正数表示做多，负数表示做空
     entry_price: float  # 平均成本
     entry_time: int  # 建仓时间戳
+    take_profit_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
     
     def is_long(self) -> bool:
         return self.quantity > 0
