@@ -210,6 +210,8 @@ def get_account(
                     "quantity": p.quantity,
                     "entry_price": p.entry_price,
                     "entry_time": p.entry_time,
+                    "take_profit_price": p.take_profit_price,
+                    "stop_loss_price": p.stop_loss_price,
                 }
                 for p in account.positions
             ],

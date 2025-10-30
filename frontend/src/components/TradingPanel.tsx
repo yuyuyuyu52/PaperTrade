@@ -47,6 +47,12 @@ export function TradingPanel({
   const [orderPrice, setOrderPrice] = useState<string>("");
   const [orderSubmitting, setOrderSubmitting] = useState(false);
 
+  // TP/SL modal state
+  const [tpslOpen, setTpslOpen] = useState(false);
+  const [tpslSymbol, setTpslSymbol] = useState<string | null>(null);
+  const [tpInput, setTpInput] = useState<string>("");
+  const [slInput, setSlInput] = useState<string>("");
+
   // Refresh account data
   const refreshAccount = useCallback(async () => {
     try {

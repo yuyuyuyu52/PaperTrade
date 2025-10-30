@@ -119,3 +119,17 @@ export async function closePosition(
   const qty = Math.abs(quantity);
   return placeOrder(mode, symbol.toUpperCase(), interval, direction, "market", qty, currentPrice);
 }
+
+export async function setPositionTpSl(
+  mode: "realtime" | "playback",
+  symbol: string,
+  interval: string,
+  takeProfitPrice?: number | null,
+  stopLossPrice?: number | null
+) {
+  const params: Record<string, any> = { mode, symbol, interval };
+  if (typeof takeProfitPrice === "number") params.take_profit_price = takeProfitPrice;
+  if (typeof stopLossPrice === "number") params.stop_loss_price = stopLossPrice;
+  const { data } = await apiClient.post(`/api/positions/tpsl`, {}, { params });
+  return data;
+}

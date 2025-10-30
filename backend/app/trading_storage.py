@@ -48,10 +48,21 @@ def init_trading_db() -> None:
                 quantity REAL NOT NULL,
                 entry_price REAL NOT NULL,
                 entry_time INTEGER NOT NULL,
+                take_profit_price REAL,
+                stop_loss_price REAL,
                 FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
             )
             """
         )
+        # 兼容旧表：尝试添加列（若已存在会抛错，忽略即可）
+        try:
+            conn.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
+        except Exception:
+            pass
         
         # 订单表
         conn.execute(
@@ -205,11 +216,14 @@ def _load_account(account_id: int) -> Account:
         # Load positions
         cursor = conn.execute("SELECT * FROM positions WHERE account_id = ?", (account_id,))
         for row in cursor:
+            keys = set(row.keys())
             pos = Position(
                 symbol=row["symbol"],
                 quantity=row["quantity"],
                 entry_price=row["entry_price"],
-                entry_time=row["entry_time"]
+                entry_time=row["entry_time"],
+                take_profit_price=row["take_profit_price"] if "take_profit_price" in keys else None,
+                stop_loss_price=row["stop_loss_price"] if "stop_loss_price" in keys else None,
             )
             account.positions.append(pos)
         
@@ -286,10 +300,10 @@ def save_account(account_id: int, account: Account) -> None:
         for pos in account.positions:
             conn.execute(
                 """
-                INSERT INTO positions (account_id, symbol, quantity, entry_price, entry_time)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO positions (account_id, symbol, quantity, entry_price, entry_time, take_profit_price, stop_loss_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (account_id, pos.symbol, pos.quantity, pos.entry_price, pos.entry_time)
+                (account_id, pos.symbol, pos.quantity, pos.entry_price, pos.entry_time, pos.take_profit_price, pos.stop_loss_price)
             )
         
         # Clear and update closed positions
