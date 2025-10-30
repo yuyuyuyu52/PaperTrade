@@ -674,13 +674,24 @@ export function ChartContainer({
 
       positionMap.set(position.symbol, position);
 
+      // Calculate current PnL and append beside quantity
+      const lastClose = (candlesRef.current && candlesRef.current.length > 0) ? candlesRef.current[candlesRef.current.length - 1].close : undefined;
+      let titleSuffix = quantityLabel;
+      if (typeof lastClose === "number") {
+        const pnl = (lastClose - position.entry_price) * position.quantity;
+        const sign = pnl > 0 ? "+" : pnl < 0 ? "-" : "";
+        const abs = Math.abs(pnl);
+        const pnlLabel = abs >= 1 ? abs.toFixed(2) : abs.toFixed(4);
+        titleSuffix = `${quantityLabel} (${sign}${pnlLabel})`;
+      }
+
       ensureLine(
         keyBase,
         buildPriceLineOptions(
           position.entry_price,
           position.quantity > 0 ? POSITION_LONG_LINE_COLOR : POSITION_SHORT_LINE_COLOR,
-          `${directionLabel} ${quantityLabel}`,
-          LineStyle.Solid,
+          `${directionLabel} ${titleSuffix}`,
+          LineStyle.Dashed,
           2
         )
       );
