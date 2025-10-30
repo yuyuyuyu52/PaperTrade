@@ -236,9 +236,20 @@ export function TradingPanel({
                         <td>${currentPrice.toFixed(2)}</td>
                         <td className={pnl >= 0 ? "gain" : "loss"}>${pnl.toFixed(2)}</td>
                         <td className={pnlPct >= 0 ? "gain" : "loss"}>{pnlPct.toFixed(2)}%</td>
-                        <td>
+                        <td style={{ display: "flex", gap: 8 }}>
                           <button className="cancel-btn" onClick={() => handleClosePosition(pos.quantity)}>
                             平仓
+                          </button>
+                          <button
+                            className="cancel-btn"
+                            onClick={() => {
+                              setTpslSymbol(pos.symbol);
+                              setTpInput(pos.take_profit_price != null ? String(pos.take_profit_price) : "");
+                              setSlInput(pos.stop_loss_price != null ? String(pos.stop_loss_price) : "");
+                              setTpslOpen(true);
+                            }}
+                          >
+                            止盈/止损
                           </button>
                         </td>
                       </tr>
