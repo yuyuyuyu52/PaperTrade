@@ -24,6 +24,11 @@ interface ChartContainerProps {
   interval: Interval;
   onRequestHistory?: (earliestTime: number) => Promise<void> | void;
   activeTool?: "line" | "fib" | "rectangle" | "none";
+  onToolChange?: (tool: "line" | "fib" | "rectangle" | "none") => void;
+  onSelectionChange?: (id: string | null) => void;
+  selectedDrawingId?: string | null;
+  selectedColor?: string;
+  onColorChange?: (color: string) => void;
   drawings?: DrawingData[];
   onAddDrawing?: (drawing: DrawingData) => Promise<void>;
   onRemoveDrawing?: (drawingId: string) => Promise<void>;
@@ -179,12 +184,17 @@ function toUnixTime(value: BusinessDay | UTCTimestamp | string): number {
   return Math.floor(Date.UTC(value.year, value.month - 1, value.day) / 1000);
 }
 
-export function ChartContainer({ 
-  candles, 
-  mode, 
-  interval, 
+export function ChartContainer({
+  candles,
+  mode,
+  interval,
   onRequestHistory,
   activeTool,
+  onToolChange,
+  onSelectionChange,
+  selectedDrawingId,
+  selectedColor,
+  onColorChange,
   drawings,
   onAddDrawing,
   onRemoveDrawing,
@@ -294,7 +304,8 @@ export function ChartContainer({
         horzLines: { visible: false }
       },
       rightPriceScale: {
-        borderVisible: false
+        borderVisible: false,
+        scaleMargins: { top: 0.02, bottom: 0.1 }
       },
       timeScale: {
         fixLeftEdge: false,
@@ -635,6 +646,21 @@ export function ChartContainer({
       manager.loadDrawings(drawings);
     }
 
+    if (onAddDrawing) manager.setOnDrawingComplete(onAddDrawing);
+
+    // In-place update: save with same id
+    manager.setOnDrawingUpdated(async (updated: DrawingData) => {
+      try {
+        if (onAddDrawing) await onAddDrawing(updated);
+      } catch (e) {
+        console.error('[DrawingUpdate] Failed to save drawing', e);
+      }
+    });
+
+    if (onRemoveDrawing) (manager as any).setOnRemoveDrawing(onRemoveDrawing);
+
+    if (onToolChange) manager.setOnToolChange(onToolChange);
+
     if (activeTool) {
       manager.setTool(activeTool);
     }
@@ -665,6 +691,13 @@ export function ChartContainer({
       drawingPluginRef.current.loadDrawings(drawings);
     }
   }, [drawings]);
+
+  // Keep candles up to date inside drawing manager for snapping and right-margin extrapolation
+  useEffect(() => {
+    if ((drawingPluginRef.current as any)?.updateCandles) {
+      (drawingPluginRef.current as any).updateCandles(candles);
+    }
+  }, [candles]);
 
   useEffect(() => {
     if (!chartRef.current) {
@@ -880,21 +913,54 @@ export function ChartContainer({
           fontSize: 12,
           pointerEvents: "none",
           boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
-          zIndex: 10
+          zIndex: 10,
+          display: 'flex',
+          gap: 8
         }}
       >
         <div>{formatTimestampForInterval(info.time as UTCTimestamp, interval)}</div>
         <div>
-          O: {PRICE_FORMATTER.format(info.open)} H: {PRICE_FORMATTER.format(info.high)} L: {PRICE_FORMATTER.format(info.low)} C: {PRICE_FORMATTER.format(info.close)}
+          开: {PRICE_FORMATTER.format(info.open)} 高: {PRICE_FORMATTER.format(info.high)} 低: {PRICE_FORMATTER.format(info.low)} 收: {PRICE_FORMATTER.format(info.close)}
         </div>
       </div>
     );
   }
 
+  // Color selector near OHLC overlay
+  const colorOverlay = selectedDrawingId ? (
+    <div
+      style={{
+        position: "absolute",
+        top: 8,
+        left: hoverInfo ? 340 : 12,
+        padding: "4px 6px",
+        borderRadius: 4,
+        border: "1px solid rgba(0,0,0,0.15)",
+        backgroundColor: "rgba(255,255,255,0.95)",
+        zIndex: 11
+      }}
+    >
+      <select
+        value={selectedColor ?? ''}
+        onChange={(e) => onColorChange && onColorChange(e.target.value)}
+        style={{ fontSize: 12 }}
+        title="选择颜色"
+      >
+        <option value="">颜色</option>
+        <option value="#22aa6a">绿色</option>
+        <option value="#d64a4a">红色</option>
+        <option value="#2a66d9">蓝色</option>
+        <option value="#ffb300">橙色</option>
+        <option value="#111111">黑色</option>
+      </select>
+    </div>
+  ) : null;
+
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} data-chart-container />
       {hoverOverlay}
+      {colorOverlay}
       {!isAutoFollow && (
         <button
           type="button"

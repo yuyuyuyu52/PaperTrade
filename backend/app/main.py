@@ -26,6 +26,10 @@ from .trading_storage import (
     get_or_create_account,
     get_account_stats,
     get_account_id,
+    save_account,
+    clear_orders,
+    clear_trades,
+    reset_account_stats,
 )
 from .trading_engine import get_trading_engine
 
@@ -145,6 +149,67 @@ def clear_drawings(symbol: str = Query(..., min_length=1), interval: str = Query
     return {"success": True, "deleted": count}
 
 
+@app.post("/api/accounts/{mode}/{symbol}/{interval}/reset")
+def reset_account(mode: str, symbol: str, interval: str) -> dict:
+    """Reset account to initial state."""
+    try:
+        uppercase_symbol = _validate_symbol(symbol)
+    except HTTPException as exc:
+        raise exc
+    
+    if mode not in ["realtime", "playback"]:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    
+    interval = interval.lower()
+    if interval not in INTERVAL_MINUTES:
+        raise HTTPException(status_code=400, detail="Unsupported interval")
+    
+    # Get account
+    account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+    
+    # Reset to initial balance
+    initial_balance = account.initial_balance
+    account.balance = initial_balance
+    account.positions = []
+    account.orders = []
+    account.trades = []
+    account.closed_positions = []
+
+    # Clear orders/trades and reset stats, then persist positions/closed positions (empty)
+    clear_orders(account_id)
+    clear_trades(account_id)
+    reset_account_stats(account_id)
+
+    # Save reset account
+    save_account(account_id, account)
+    
+    logger.info(f"[ResetAccount] Account reset: {mode}/{uppercase_symbol}/{interval}")
+    return {"success": True, "balance": account.balance}
+
+
+def _check_and_trigger_tpsl(mode: str, symbol: str, interval: str, candle: dict) -> None:
+    """检查并触发止盈止损和限价单"""
+    try:
+        account_id, account = get_or_create_account(mode, symbol, interval)
+        engine = get_trading_engine(account_id, account)
+        
+        current_price = candle["close"]
+        high = candle.get("high")
+        low = candle.get("low")
+        
+        # 检查限价单（使用K线高低价）
+        filled_orders = engine.try_fill_limit_orders(symbol, current_price, high, low)
+        if filled_orders:
+            logger.info(f"[LimitOrder] Filled {len(filled_orders)} orders for {symbol}")
+        
+        # 检查止盈止损（使用K线高低价）
+        triggered_orders = engine.check_tpsl_triggers(symbol, current_price, high, low)
+        if triggered_orders:
+            logger.info(f"[TPSL] Triggered {len(triggered_orders)} orders for {symbol} @ {current_price}")
+    except Exception as e:
+        logger.error(f"[TPSL] Error checking TP/SL: {e}")
+
+
 @app.websocket("/ws/candles")
 async def stream_candles(websocket: WebSocket, symbol: str, interval: str) -> None:
     try:
@@ -162,11 +227,16 @@ async def stream_candles(websocket: WebSocket, symbol: str, interval: str) -> No
 
     try:
         async for update in iter_future_candles(uppercase_symbol, interval):
+            candle = update["candle"]
+            
+            # 实时检查止盈止损和限价单（每次更新都检查，包括未完成的K线）
+            _check_and_trigger_tpsl("realtime", uppercase_symbol, interval, candle)
+            
             await websocket.send_json({
                 "type": "update",
                 "symbol": uppercase_symbol,
                 "interval": interval,
-                "candle": update["candle"],
+                "candle": candle,
                 "final": update.get("final", True),
             })
     except WebSocketDisconnect:
@@ -231,6 +301,35 @@ def get_account(
                     "status": o.status,
                 }
                 for o in account.orders
+            ],
+            "trades": [
+                {
+                    "id": t.id,
+                    "symbol": t.symbol,
+                    "direction": t.direction,
+                    "quantity": t.quantity,
+                    "price": t.price,
+                    "timestamp": t.timestamp,
+                    "commission": t.commission,
+                }
+                for t in account.trades
+            ],
+            "closed_positions": [
+                {
+                    "id": cp.id,
+                    "symbol": cp.symbol,
+                    "direction": cp.direction,
+                    "quantity": cp.quantity,
+                    "entry_price": cp.entry_price,
+                    "entry_time": cp.entry_time,
+                    "exit_price": cp.exit_price,
+                    "exit_time": cp.exit_time,
+                    "profit_loss": cp.profit_loss,
+                    "commission": cp.commission,
+                    "days_held": cp.days_held(),
+                    "return_pct": cp.return_pct(),
+                }
+                for cp in account.closed_positions
             ],
             "stats": {
                 "total_trades": stats.total_trades if stats else 0,
@@ -444,5 +543,35 @@ def get_stats(
             "cumulative_return": stats.cumulative_return,
             "total_return": stats.total_return,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/positions/tpsl")
+def set_position_tpsl(
+    mode: str = Query(...),
+    symbol: str = Query(...),
+    interval: str = Query(...),
+    take_profit_price: Optional[float] = Query(None),
+    stop_loss_price: Optional[float] = Query(None),
+):
+    """Set take profit and stop loss for a position."""
+    try:
+        # Validate and uppercase symbol
+        uppercase_symbol = _validate_symbol(symbol)
+        
+        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        engine = get_trading_engine(account_id, account)
+        
+        success = engine.set_position_tpsl(uppercase_symbol, take_profit_price, stop_loss_price)
+        
+        return {
+            "success": success,
+            "symbol": uppercase_symbol,
+            "take_profit_price": take_profit_price,
+            "stop_loss_price": stop_loss_price,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

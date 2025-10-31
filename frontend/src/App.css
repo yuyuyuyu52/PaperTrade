@@ -74,6 +74,8 @@
   border-bottom: 1px solid #e0e0e0;
   flex-shrink: 0;
   min-height: 50px;
+  position: relative;
+  z-index: 20; /* above drawing canvas (z-index:5) */
 }
 
 .drawing-tools-container {
@@ -82,17 +84,65 @@
   padding: 0.5rem 1rem;
   margin-left: auto;
   gap: 1rem;
+  position: relative;
+  z-index: 21;
+  pointer-events: auto;
+}
+
+.split-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .chart-content {
-  flex: 1;
-  overflow: hidden;
-  transition: flex 0.3s ease;
   position: relative;
+  overflow: hidden;
+  min-height: 200px;
 }
 
-.chart-content.with-trading-panel {
-  flex: 0.6;
+.resizer {
+  height: 8px;
+  background: #e0e0e0;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.resizer:hover {
+  background: #d0d0d0;
+}
+
+.resizer:active {
+  background: #22aa6a;
+}
+
+.resizer-line {
+  width: 60px;
+  height: 3px;
+  background: #999;
+  border-radius: 2px;
+}
+
+.resizer:hover .resizer-line {
+  background: #666;
+}
+
+.resizer:active .resizer-line {
+  background: #fff;
+}
+
+.trading-panel-container {
+  position: relative;
+  overflow: hidden;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
 }
 
 .playback-controls {

@@ -21,19 +21,18 @@ def _connect() -> sqlite3.Connection:
 def init_trading_db() -> None:
     """Initialize trading database tables."""
     with _connect() as conn:
-        # 账户表
+        # 账户表 (全局账户，不区分时间周期)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 mode TEXT NOT NULL,
                 symbol TEXT NOT NULL,
-                interval TEXT NOT NULL,
                 initial_balance REAL NOT NULL,
                 balance REAL NOT NULL,
                 created_time INTEGER NOT NULL,
                 last_update_time INTEGER NOT NULL,
-                UNIQUE(mode, symbol, interval)
+                UNIQUE(mode, symbol)
             )
             """
         )
@@ -151,27 +150,27 @@ def init_trading_db() -> None:
 
 
 def get_or_create_account(mode: str, symbol: str, interval: str, initial_balance: float = 10000.0) -> Tuple[int, Account]:
-    """Get or create account."""
+    """Get or create account. interval is kept for Account object but not used for DB lookup."""
     with _connect() as conn:
         cursor = conn.execute(
-            "SELECT id FROM accounts WHERE mode = ? AND symbol = ? AND interval = ?",
-            (mode, symbol, interval)
+            "SELECT id FROM accounts WHERE mode = ? AND symbol = ?",
+            (mode, symbol)
         )
         row = cursor.fetchone()
         
         if row:
             account_id = row["id"]
-            account = _load_account(account_id)
+            account = _load_account(account_id, interval)
             return account_id, account
         
         # Create new account
         now = int(datetime.utcnow().timestamp())
         cursor = conn.execute(
             """
-            INSERT INTO accounts (mode, symbol, interval, initial_balance, balance, created_time, last_update_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO accounts (mode, symbol, initial_balance, balance, created_time, last_update_time)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (mode, symbol, interval, initial_balance, initial_balance, now, now)
+            (mode, symbol, initial_balance, initial_balance, now, now)
         )
         account_id = cursor.lastrowid
         conn.commit()
@@ -195,7 +194,7 @@ def get_or_create_account(mode: str, symbol: str, interval: str, initial_balance
         return account_id, account
 
 
-def _load_account(account_id: int) -> Account:
+def _load_account(account_id: int, interval: str = "") -> Account:
     """Load account from database."""
     with _connect() as conn:
         cursor = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,))
@@ -206,7 +205,7 @@ def _load_account(account_id: int) -> Account:
         account = Account(
             mode=row["mode"],
             symbol=row["symbol"],
-            interval=row["interval"],
+            interval=interval,  # Passed as parameter, not stored in DB
             initial_balance=row["initial_balance"],
             balance=row["balance"],
             created_time=row["created_time"],
@@ -320,6 +319,47 @@ def save_account(account_id: int, account: Account) -> None:
                  closed_pos.profit_loss, closed_pos.commission)
             )
         
+        conn.commit()
+
+
+def clear_orders(account_id: int) -> None:
+    """Delete all orders for the account."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM orders WHERE account_id = ?", (account_id,))
+        conn.commit()
+
+
+def clear_trades(account_id: int) -> None:
+    """Delete all trades for the account."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM trades WHERE account_id = ?", (account_id,))
+        conn.commit()
+
+
+def reset_account_stats(account_id: int) -> None:
+    """Reset account statistics to zeros for the account."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE account_stats SET 
+                total_trades = 0,
+                winning_trades = 0,
+                losing_trades = 0,
+                win_rate = 0,
+                total_profit = 0,
+                total_loss = 0,
+                profit_factor = 0,
+                expectancy = 0,
+                max_drawdown = 0,
+                max_drawdown_pct = 0,
+                sharpe_ratio = 0,
+                cagr = 0,
+                cumulative_return = 0,
+                total_return = 0
+            WHERE account_id = ?
+            """,
+            (account_id,)
+        )
         conn.commit()
 
 

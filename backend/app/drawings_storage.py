@@ -22,7 +22,7 @@ def init_drawings_db() -> None:
         CREATE TABLE IF NOT EXISTS drawings (
             id TEXT PRIMARY KEY,
             symbol TEXT NOT NULL,
-            interval TEXT NOT NULL,
+            interval TEXT,
             tool TEXT NOT NULL,
             points TEXT NOT NULL,
             color TEXT,
@@ -32,6 +32,11 @@ def init_drawings_db() -> None:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Best-effort add interval column for existing DBs
+    try:
+        cursor.execute("ALTER TABLE drawings ADD COLUMN interval TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     conn.commit()
     conn.close()
@@ -50,7 +55,7 @@ def save_drawing(drawing: Drawing) -> None:
     """, (
         drawing.id,
         drawing.symbol,
-        drawing.interval,
+        getattr(drawing, 'interval', None),
         drawing.tool,
         json.dumps(drawing.points),
         drawing.color,
@@ -62,28 +67,41 @@ def save_drawing(drawing: Drawing) -> None:
     conn.close()
 
 
-def get_drawings(symbol: str, interval: str) -> List[Drawing]:
-    """Get all drawings for a symbol and interval."""
+def get_drawings(symbol: str, interval: Optional[str] = None) -> List[Drawing]:
+    """Get drawings for a symbol, optionally filtered by interval."""
     db_path = get_drawings_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    cursor.execute("""
-        SELECT * FROM drawings 
-        WHERE symbol = ? AND interval = ?
-        ORDER BY created_at ASC
-    """, (symbol, interval))
+    if interval:
+        cursor.execute(
+            """
+            SELECT * FROM drawings 
+            WHERE symbol = ? AND (interval = ? OR interval IS NULL OR interval = '')
+            ORDER BY created_at ASC
+            """,
+            (symbol, interval),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT * FROM drawings 
+            WHERE symbol = ?
+            ORDER BY created_at ASC
+            """,
+            (symbol,),
+        )
     
     rows = cursor.fetchall()
     conn.close()
     
-    drawings = []
+    drawings: List[Drawing] = []
     for row in rows:
         drawing = Drawing(
             id=row["id"],
             symbol=row["symbol"],
-            interval=row["interval"],
+            interval=row["interval"] or "",
             tool=row["tool"],
             points=json.loads(row["points"]),
             color=row["color"],
@@ -109,16 +127,22 @@ def delete_drawing(drawing_id: str) -> bool:
     return affected > 0
 
 
-def delete_all_drawings(symbol: str, interval: str) -> int:
-    """Delete all drawings for a symbol and interval."""
+def delete_all_drawings(symbol: str, interval: Optional[str] = None) -> int:
+    """Delete drawings for a symbol, optionally filtered by interval."""
     db_path = get_drawings_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    cursor.execute(
-        "DELETE FROM drawings WHERE symbol = ? AND interval = ?",
-        (symbol, interval)
-    )
+    if interval:
+        cursor.execute(
+            "DELETE FROM drawings WHERE symbol = ? AND (interval = ? OR interval IS NULL OR interval = '')",
+            (symbol, interval),
+        )
+    else:
+        cursor.execute(
+            "DELETE FROM drawings WHERE symbol = ?",
+            (symbol,),
+        )
     conn.commit()
     affected = cursor.rowcount
     conn.close()

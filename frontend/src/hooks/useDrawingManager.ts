@@ -36,14 +36,23 @@ export function useDrawingManager({ symbol, interval }: DrawingManagerOptions) {
   const addDrawing = useCallback(
     async (drawing: DrawingData) => {
       try {
-        await saveDrawing({
+        const saved = await saveDrawing({
           ...drawing,
           symbol,
           interval,
         });
-        const updated = [...drawings, drawing];
-        setDrawings(updated);
-        drawingsRef.current = updated;
+        setDrawings((prev) => {
+          const idx = prev.findIndex((d) => d.id === saved.id);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = saved;
+            drawingsRef.current = next;
+            return next;
+          }
+          const next = [...prev, saved];
+          drawingsRef.current = next;
+          return next;
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to save drawing";
         setError(message);
@@ -51,16 +60,18 @@ export function useDrawingManager({ symbol, interval }: DrawingManagerOptions) {
         throw err;
       }
     },
-    [drawings, symbol, interval]
+    [symbol, interval]
   );
 
   const removeDrawing = useCallback(
     async (drawingId: string) => {
       try {
         await deleteDrawing(drawingId);
-        const updated = drawings.filter((d) => d.id !== drawingId);
-        setDrawings(updated);
-        drawingsRef.current = updated;
+        setDrawings((prev) => {
+          const next = prev.filter((d) => d.id !== drawingId);
+          drawingsRef.current = next;
+          return next;
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to delete drawing";
         setError(message);
@@ -68,7 +79,7 @@ export function useDrawingManager({ symbol, interval }: DrawingManagerOptions) {
         throw err;
       }
     },
-    [drawings]
+    []
   );
 
   const clearAllDrawings = useCallback(async () => {

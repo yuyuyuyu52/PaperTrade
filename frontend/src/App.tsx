@@ -6,7 +6,7 @@ import TradingPanel from "./components/TradingPanel";
 import { usePlaybackController } from "./hooks/usePlaybackController";
 import { useDrawingManager } from "./hooks/useDrawingManager";
 import { fetchCandles, fetchInstruments, fetchTimeRange } from "./services/api";
-import { getAccount } from "./services/tradingApi";
+import { getAccount, placeOrder } from "./services/tradingApi";
 import { subscribeToRealtime } from "./services/websocketClient";
 import { Candle, Instrument, Interval, Mode } from "./types";
 import { Order, Position } from "./types/trading";
@@ -30,17 +30,21 @@ const INTERVAL_SECONDS: Record<Interval, number> = {
 function App() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(DEFAULT_SYMBOL);
-  const [interval, setInterval] = useState<Interval>(DEFAULT_INTERVAL);
+  const [interval, setInterval] = useState<Interval>(() => (localStorage.getItem('tv.interval') as Interval) || DEFAULT_INTERVAL);
   const [mode, setMode] = useState<Mode>("realtime");
   const [realtimeCandles, setRealtimeCandles] = useState<Candle[]>([]);
   const [playbackCandles, setPlaybackCandles] = useState<Candle[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<"line" | "fib" | "rectangle" | "none">("none");
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [selectedColor, setSelectedColor] = useState<string | undefined>(undefined);
   const [tempLatestCandle, setTempLatestCandle] = useState<Candle | null>(null);
   const [tradingPanelExpanded, setTradingPanelExpanded] = useState(false);
   const [accountPositions, setAccountPositions] = useState<Position[]>([]);
   const [openOrders, setOpenOrders] = useState<Order[]>([]);
+  const [chartHeight, setChartHeight] = useState(60); // 图表高度百分比
+  const [isDragging, setIsDragging] = useState(false);
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const realtimeHistoryLoadingRef = useRef(false);
@@ -123,10 +127,6 @@ function App() {
               if (final) {
                 // final=true: 这是一条完成的 K 线，添加到永久数组
                 setRealtimeCandles((previous: Candle[]) => {
-                  if (previous.length === 0) {
-                    return [candle];
-                  }
-
                   const next = [...previous];
                   const index = next.findIndex((item) => item.time === candle.time);
                   if (index >= 0) {
@@ -267,6 +267,90 @@ function App() {
     }
   }, [interval, mode, selectedSymbol, setError]);
 
+  const handlePlaceOrder = useCallback(async (
+    direction: "buy" | "sell",
+    type: "market" | "limit",
+    price?: number
+  ) => {
+    try {
+      const tradingMode = mode === "realtime" ? "realtime" : "playback";
+      const currentPrice = activeCandles.length > 0 ? activeCandles[activeCandles.length - 1].close : 0;
+      
+      if (currentPrice <= 0) {
+        console.error("[Hotkey] No current price available");
+        return;
+      }
+      
+      const quantity = 1; // Default quantity
+      const limitPrice = type === "limit" ? price : undefined;
+      
+      console.log("[Hotkey] Placing order:", {
+        mode: tradingMode,
+        symbol: selectedSymbol,
+        interval,
+        direction,
+        type,
+        quantity,
+        currentPrice,
+        limitPrice
+      });
+      
+      await placeOrder(
+        tradingMode,
+        selectedSymbol.toUpperCase(),
+        interval,
+        direction,
+        type,
+        quantity,
+        currentPrice,
+        limitPrice
+      );
+      
+      console.log("[Hotkey] Order placed successfully");
+    } catch (err) {
+      console.error("[Hotkey] Failed to place order:", err);
+    }
+  }, [mode, selectedSymbol, interval, activeCandles]);
+
+  // Handle resizer drag
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const wrapper = document.querySelector('.chart-wrapper') as HTMLElement;
+      if (!wrapper) return;
+
+      const rect = wrapper.getBoundingClientRect();
+      const navbarHeight = 50; // 大概的navbar高度
+      const topControlHeight = 60; // 顶部控制栏高度
+      const availableHeight = rect.height;
+      const mouseY = e.clientY - rect.top;
+      
+      // 计算百分比，限制在20%-80%之间
+      let newChartHeight = (mouseY / availableHeight) * 100;
+      newChartHeight = Math.max(20, Math.min(80, newChartHeight));
+      
+      setChartHeight(newChartHeight);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
   return (
     <div className="app">
       <nav className="navbar">
@@ -281,12 +365,30 @@ function App() {
           </select>
         </div>
         <div className="navbar-item">
-          <label htmlFor="interval">时间级别</label>
-          <select id="interval" value={interval} onChange={(e) => setInterval(e.target.value as Interval)}>
-            {["1m", "5m", "15m", "1h", "4h", "1d"].map((v) => (
-              <option key={v} value={v}>{v}</option>
-            ))}
-          </select>
+          <label>时间级别</label>
+          <div role="group" aria-label="intervals">
+            {["1m", "5m", "15m", "1h", "4h", "1d"].map((v) => {
+              const isActive = interval === (v as Interval);
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => { setInterval(v as Interval); localStorage.setItem('tv.interval', v); }}
+                  style={{
+                    marginRight: 6,
+                    padding: '4px 8px',
+                    borderRadius: 4,
+                    border: '1px solid ' + (isActive ? '#2a66d9' : 'rgba(0,0,0,0.2)'),
+                    background: isActive ? '#e8f0ff' : '#fff',
+                    color: isActive ? '#2a66d9' : '#111',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {v}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="navbar-item">
           <label htmlFor="mode">模式</label>
@@ -337,37 +439,76 @@ function App() {
             />
           </div>
         </div>
-        <div className={`chart-content ${tradingPanelExpanded ? "with-trading-panel" : ""}`}>
-          {activeCandles.length > 0 && (
-            <ChartContainer
-              candles={activeCandles}
+        <div className="split-container">
+          <div 
+            className="chart-content" 
+            style={{ 
+              height: tradingPanelExpanded ? `${chartHeight}%` : '100%',
+              transition: isDragging ? 'none' : 'height 0.3s ease'
+            }}
+          >
+            {activeCandles.length > 0 && (
+              <ChartContainer
+                candles={activeCandles}
+                mode={mode}
+                interval={interval}
+                onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
+                activeTool={activeTool}
+                onToolChange={setActiveTool}
+                drawings={drawingManager.drawings}
+                onAddDrawing={drawingManager.addDrawing}
+                onRemoveDrawing={drawingManager.removeDrawing}
+                positions={accountPositions}
+                orders={openOrders}
+                onPlaceOrder={handlePlaceOrder}
+              />
+            )}
+            {loading && <div className="status-layer loading">加载中...</div>}
+            {error && <div className="status-layer error">{error}</div>}
+            {!loading && !error && activeCandles.length === 0 && (
+              <div className="status-layer placeholder">暂无数据</div>
+            )}
+          </div>
+          
+          {tradingPanelExpanded && activeCandles.length > 0 && (
+            <>
+              <div 
+                className="resizer" 
+                onMouseDown={handleMouseDown}
+                style={{ cursor: 'ns-resize' }}
+              >
+                <div className="resizer-line"></div>
+              </div>
+              <div 
+                className="trading-panel-container"
+                style={{ 
+                  height: `${100 - chartHeight}%`,
+                  transition: isDragging ? 'none' : 'height 0.3s ease'
+                }}
+              >
+                <TradingPanel
+                  mode={mode}
+                  symbol={selectedSymbol}
+                  interval={interval}
+                  currentPrice={activeCandles[activeCandles.length - 1]?.close ?? 0}
+                  isExpanded={tradingPanelExpanded}
+                  onToggleExpand={() => setTradingPanelExpanded(!tradingPanelExpanded)}
+                />
+              </div>
+            </>
+          )}
+          
+          {!tradingPanelExpanded && activeCandles.length > 0 && (
+            <TradingPanel
               mode={mode}
+              symbol={selectedSymbol}
               interval={interval}
-              onRequestHistory={mode === "realtime" ? loadMoreRealtimeHistory : undefined}
-              activeTool={activeTool}
-              drawings={drawingManager.drawings}
-              onAddDrawing={drawingManager.addDrawing}
-              onRemoveDrawing={drawingManager.removeDrawing}
-              positions={accountPositions}
-              orders={openOrders}
+              currentPrice={activeCandles[activeCandles.length - 1]?.close ?? 0}
+              isExpanded={tradingPanelExpanded}
+              onToggleExpand={() => setTradingPanelExpanded(!tradingPanelExpanded)}
             />
           )}
-          {loading && <div className="status-layer loading">加载中...</div>}
-          {error && <div className="status-layer error">{error}</div>}
-          {!loading && !error && activeCandles.length === 0 && (
-            <div className="status-layer placeholder">暂无数据</div>
-          )}
         </div>
-        {activeCandles.length > 0 && (
-          <TradingPanel
-            mode={mode}
-            symbol={selectedSymbol}
-            interval={interval}
-            currentPrice={activeCandles[activeCandles.length - 1]?.close ?? 0}
-            isExpanded={tradingPanelExpanded}
-            onToggleExpand={() => setTradingPanelExpanded(!tradingPanelExpanded)}
-          />
-        )}
       </div>
     </div>
   );

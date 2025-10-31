@@ -75,5 +75,7 @@ export interface Account {
   balance: number;
   positions: Position[];
   orders: Order[];
+  trades: Trade[];
+  closed_positions: ClosedPosition[];
   stats: Partial<AccountStats>;
 }

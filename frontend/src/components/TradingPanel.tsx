@@ -14,6 +14,7 @@ import {
   listClosedPositions,
   getAccountStats,
   closePosition,
+  setPositionTpSl,
 } from "../services/tradingApi";
 import "./TradingPanel.css";
 
@@ -142,10 +143,79 @@ export function TradingPanel({
   const handleClosePosition = async (posQty: number) => {
     try {
       const tradingMode = mode === "realtime" ? "realtime" : "playback";
+      console.log("[ClosePosition] Closing position:", {
+        symbol,
+        posQty,
+        direction: posQty > 0 ? "sell" : "buy",
+        qty: Math.abs(posQty),
+        currentPrice
+      });
       await closePosition(tradingMode, symbol, interval, posQty, currentPrice);
       await refreshAccount();
+      console.log("[ClosePosition] Success");
     } catch (err) {
-      setError(String(err));
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error("[ClosePosition] Error:", errorMsg);
+      setError(`平仓失败: ${errorMsg}`);
+    }
+  };
+
+  // Handle TP/SL update
+  const handleUpdateTpsl = async () => {
+    if (!tpslSymbol) return;
+    
+    try {
+      const tradingMode = mode === "realtime" ? "realtime" : "playback";
+      const tp = tpInput ? parseFloat(tpInput) : null;
+      const sl = slInput ? parseFloat(slInput) : null;
+      
+      // Validate inputs
+      if (tpInput && isNaN(tp!)) {
+        setError("止盈价格格式错误");
+        return;
+      }
+      if (slInput && isNaN(sl!)) {
+        setError("止损价格格式错误");
+        return;
+      }
+      
+      await setPositionTpSl(tradingMode, tpslSymbol, interval, tp, sl);
+      
+      console.log("更新止盈止损成功:", { symbol: tpslSymbol, tp, sl });
+      setTpslOpen(false);
+      setError(null);
+      await refreshAccount();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error("设置止盈止损失败:", errorMsg);
+      setError(`设置失败: ${errorMsg}`);
+    }
+  };
+
+  // Handle reset account
+  const handleResetAccount = async () => {
+    if (!confirm("确定要重置账户吗？所有持仓、订单和交易记录将被清空，账户余额将恢复到初始值。")) {
+      return;
+    }
+    
+    try {
+      const tradingMode = mode === "realtime" ? "realtime" : "playback";
+      const response = await fetch(
+        `/api/accounts/${tradingMode}/${symbol.toUpperCase()}/${interval}/reset`,
+        { method: "POST" }
+      );
+      
+      if (!response.ok) {
+        throw new Error("重置账户失败");
+      }
+      
+      console.log("[ResetAccount] Account reset successfully");
+      await refreshAccount();
+      setError(null);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error("[ResetAccount] Error:", errorMsg);
+      setError(`重置失败: ${errorMsg}`);
     }
   };
 
@@ -160,47 +230,69 @@ export function TradingPanel({
   }
 
   const validPositions = account.positions.filter(p => Math.abs(p.quantity) > 1e-10);
-  const totalValue = account.balance + validPositions.reduce((sum, p) => sum + Math.abs(p.quantity) * currentPrice, 0);
-  const floatingPnl = validPositions.reduce((sum, p) => {
-    const pnl = p.quantity > 0
-      ? p.quantity * (currentPrice - p.entry_price)
-      : p.quantity * (p.entry_price - currentPrice);
+  
+  // 计算持仓市值
+  const positionValue = validPositions.reduce((sum, p) => {
+    return sum + Math.abs(p.quantity) * currentPrice;
+  }, 0);
+  
+  // 账户余额 = 现金余额 + 持仓市值
+  const accountBalance = account.balance + positionValue;
+  
+  // 当前盈亏 = 未平仓持仓的浮动盈亏
+  const currentPnl = validPositions.reduce((sum, p) => {
+    let pnl;
+    if (p.quantity > 0) {
+      // 多头：盈亏 = (当前价 - 建仓价) × 数量
+      pnl = (currentPrice - p.entry_price) * p.quantity;
+    } else {
+      // 空头：盈亏 = (建仓价 - 当前价) × 数量
+      pnl = (p.entry_price - currentPrice) * Math.abs(p.quantity);
+    }
     return sum + pnl;
+  }, 0);
+  
+  // 总盈亏 = 已平仓的实现盈亏累计
+  const totalPnl = account.closed_positions.reduce((sum: number, cp: ClosedPosition) => {
+    return sum + cp.profit_loss;
   }, 0);
 
   return (
     <div className={`trading-panel ${isExpanded ? "trading-panel-expanded" : "trading-panel-collapsed"}`}>
       <div className="trading-panel-header">
-        <h3>交易面板</h3>
-        <button className="trading-toggle-btn" onClick={onToggleExpand}>
-          {isExpanded ? "▼ 收起" : "▲ 展开"}
-        </button>
+        <div className="header-title">
+          <h3>交易面板</h3>
+          <button className="trading-toggle-btn" onClick={onToggleExpand}>
+            {isExpanded ? "▼ 收起" : "▲ 展开"}
+          </button>
+        </div>
+        
+        {/* Account Summary in Header */}
+        <div className="header-account-info">
+          <div className="account-info-item">
+            <label>账户余额</label>
+            <span>${accountBalance.toFixed(2)}</span>
+          </div>
+          <div className="account-info-item">
+            <label>当前盈亏</label>
+            <span className={currentPnl >= 0 ? "gain" : "loss"}>
+              {currentPnl >= 0 ? '+' : ''}{currentPnl.toFixed(2)}
+            </span>
+          </div>
+          <div className="account-info-item">
+            <label>总盈亏</label>
+            <span className={totalPnl >= 0 ? "gain" : "loss"}>
+              {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
+            </span>
+          </div>
+          <button className="reset-account-btn" onClick={handleResetAccount}>
+            重置账户
+          </button>
+        </div>
       </div>
 
       {isExpanded && (
         <div className="trading-panel-content">
-          {/* Account Summary */}
-          <div className="trading-section">
-            <h4>账户信息</h4>
-            <div className="trading-info-grid">
-              <div className="info-item">
-                <label>初始本金</label>
-                <span>${account.initial_balance.toFixed(2)}</span>
-              </div>
-              <div className="info-item">
-                <label>当前余额</label>
-                <span>${account.balance.toFixed(2)}</span>
-              </div>
-              <div className="info-item">
-                <label>总账户价值</label>
-                <span>${totalValue.toFixed(2)}</span>
-              </div>
-              <div className="info-item">
-                <label>浮动盈亏</label>
-                <span className={floatingPnl >= 0 ? "gain" : "loss"}>${floatingPnl.toFixed(2)}</span>
-              </div>
-            </div>
-          </div>
 
           {/* Positions */}
           {account.positions.length > 0 && (
@@ -222,7 +314,15 @@ export function TradingPanel({
                   {account.positions
                     .filter(pos => Math.abs(pos.quantity) > 1e-10)
                     .map((pos) => {
-                    const pnl = (currentPrice - pos.entry_price) * pos.quantity;
+                    // 计算浮动盈亏
+                    let pnl;
+                    if (pos.quantity > 0) {
+                      // 多头：盈亏 = (当前价 - 建仓价) × 数量
+                      pnl = (currentPrice - pos.entry_price) * pos.quantity;
+                    } else {
+                      // 空头：盈亏 = (建仓价 - 当前价) × 数量（取绝对值）
+                      pnl = (pos.entry_price - currentPrice) * Math.abs(pos.quantity);
+                    }
                     const pnlPct = (pnl / (Math.abs(pos.quantity) * pos.entry_price)) * 100;
                     return (
                       <tr key={pos.symbol}>
@@ -446,6 +546,45 @@ export function TradingPanel({
               <span>错误: {error}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* TP/SL Modal */}
+      {tpslOpen && (
+        <div className="modal-overlay" onClick={() => setTpslOpen(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>设置止盈止损 - {tpslSymbol}</h3>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>止盈价格 (Take Profit)</label>
+                <input
+                  type="number"
+                  value={tpInput}
+                  onChange={(e) => setTpInput(e.target.value)}
+                  step="0.01"
+                  placeholder="留空表示不设置"
+                />
+              </div>
+              <div className="form-group">
+                <label>止损价格 (Stop Loss)</label>
+                <input
+                  type="number"
+                  value={slInput}
+                  onChange={(e) => setSlInput(e.target.value)}
+                  step="0.01"
+                  placeholder="留空表示不设置"
+                />
+              </div>
+              <div className="modal-actions">
+                <button className="cancel-btn" onClick={() => setTpslOpen(false)}>
+                  取消
+                </button>
+                <button className="order-submit-btn buy" onClick={handleUpdateTpsl}>
+                  确认
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
