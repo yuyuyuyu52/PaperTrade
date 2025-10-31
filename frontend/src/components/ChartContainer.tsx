@@ -29,6 +29,7 @@ interface ChartContainerProps {
   onRemoveDrawing?: (drawingId: string) => Promise<void>;
   positions?: Position[];
   orders?: Order[];
+  onPlaceOrder?: (direction: "buy" | "sell", type: "market" | "limit", price?: number) => Promise<void>;
 }
 
 const CHART_BG = "#f5f5f5";
@@ -189,11 +190,12 @@ export function ChartContainer({
   onRemoveDrawing,
   positions,
   orders,
+  onPlaceOrder,
 }: ChartContainerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const drawingManagerRef = useRef<ChartDrawingManager | null>(null);
+  const drawingPluginRef = useRef<ChartDrawingManager | null>(null);
   const priceLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const historyLoadingRef = useRef(false);
   const requestedEarliestRef = useRef<Set<number>>(new Set());
@@ -207,6 +209,7 @@ export function ChartContainer({
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [isAutoFollow, setIsAutoFollow] = useState(true);
   const suppressRangeEventRef = useRef(false);
+  const mousePositionPriceRef = useRef<number | null>(null);
 
   const scheduleReleaseSuppression = useCallback(() => {
     window.setTimeout(() => {
@@ -325,6 +328,22 @@ export function ChartContainer({
 
   const timeScale = chart.timeScale();
   window.addEventListener("resize", handleResize);
+  
+  // 使用 ResizeObserver 监听容器大小变化（用于拖动分隔线时调整图表）
+  const resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.target === containerRef.current) {
+        const width = entry.contentRect.width;
+        const height = entry.contentRect.height;
+        chart.applyOptions({ width, height: height || 520 });
+      }
+    }
+  });
+  
+  if (containerRef.current) {
+    resizeObserver.observe(containerRef.current);
+  }
+  
   timeScale.fitContent();
   timeScale.applyOptions({ rightOffset: DEFAULT_RIGHT_OFFSET, barSpacing: INITIAL_BAR_SPACING });
 
@@ -341,7 +360,16 @@ export function ChartContainer({
       const latestCandles = candlesRef.current;
       if (latestCandles.length === 0) {
         setHoveredCandle(null);
+        mousePositionPriceRef.current = null;
         return;
+      }
+
+      // Store mouse Y position price
+      if (param.point && seriesRef.current) {
+        const price = seriesRef.current.coordinateToPrice(param.point.y);
+        mousePositionPriceRef.current = price ?? null;
+      } else {
+        mousePositionPriceRef.current = null;
       }
 
       const step = INTERVAL_STEP_SECONDS[intervalRef.current];
@@ -402,6 +430,7 @@ export function ChartContainer({
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      resizeObserver.disconnect();
       container?.removeEventListener("pointerdown", markPointerInteraction);
       container?.removeEventListener("wheel", markPointerInteraction);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
@@ -524,14 +553,79 @@ export function ChartContainer({
     }
   }, [mode]);
 
-  // Initialize drawing manager
+  // Keyboard shortcuts for trading
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (!onPlaceOrder) return;
+      
+      const isOption = e.altKey;
+      const isShift = e.shiftKey;
+      const key = e.key.toLowerCase();
+      const code = e.code.toLowerCase();
+      
+      // Check if user is typing in an input field
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+      
+      // Debug log
+      if (isOption && (key === 'b' || key === 's' || code === 'keyb' || code === 'keys')) {
+        console.log('[Hotkey] Detected:', { 
+          altKey: e.altKey, 
+          shiftKey: e.shiftKey, 
+          key: e.key, 
+          code: e.code,
+          keyCode: e.keyCode 
+        });
+      }
+      
+      let direction: "buy" | "sell" | null = null;
+      let type: "market" | "limit" | null = null;
+      
+      // Option+B / Option+Shift+B - Buy (use e.code for more reliable detection)
+      if (isOption && (key === 'b' || code === 'keyb')) {
+        e.preventDefault();
+        direction = "buy";
+        type = isShift ? "limit" : "market";
+      }
+      // Option+S / Option+Shift+S - Sell
+      else if (isOption && (key === 's' || code === 'keys')) {
+        e.preventDefault();
+        direction = "sell";
+        type = isShift ? "limit" : "market";
+      }
+      
+      if (direction && type) {
+        try {
+          const price = type === "limit" ? mousePositionPriceRef.current ?? undefined : undefined;
+          if (type === "limit" && !price) {
+            console.warn("[Hotkey] No price available for limit order");
+            return;
+          }
+          console.log(`[Hotkey] Placing ${type} ${direction} order`, price ? `at ${price}` : '');
+          await onPlaceOrder(direction, type, price);
+        } catch (err) {
+          console.error("[Hotkey] Failed to place order:", err);
+        }
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onPlaceOrder]);
+
+  // Initialize drawing manager (reference implementation)
   useEffect(() => {
     if (!chartRef.current || !seriesRef.current) {
       return;
     }
 
     const manager = new ChartDrawingManager(chartRef.current, seriesRef.current, interval, candles);
-    drawingManagerRef.current = manager;
+    drawingPluginRef.current = manager;
 
     if (onAddDrawing) {
       manager.setOnDrawingComplete(onAddDrawing);
@@ -547,20 +641,28 @@ export function ChartContainer({
 
     return () => {
       manager.destroy();
+      drawingPluginRef.current = null;
     };
-  }, [interval, candles, onAddDrawing]);
+  }, [interval]);
 
   // Update drawing tool
   useEffect(() => {
-    if (drawingManagerRef.current && activeTool) {
-      drawingManagerRef.current.setTool(activeTool);
+    if (drawingPluginRef.current && activeTool) {
+      drawingPluginRef.current.setTool(activeTool);
     }
   }, [activeTool]);
 
+  // Update complete callback without recreating manager
+  useEffect(() => {
+    if (drawingPluginRef.current && onAddDrawing) {
+      drawingPluginRef.current.setOnDrawingComplete(onAddDrawing);
+    }
+  }, [onAddDrawing]);
+
   // Update drawings
   useEffect(() => {
-    if (drawingManagerRef.current && drawings) {
-      drawingManagerRef.current.loadDrawings(drawings);
+    if (drawingPluginRef.current && drawings) {
+      drawingPluginRef.current.loadDrawings(drawings);
     }
   }, [drawings]);
 

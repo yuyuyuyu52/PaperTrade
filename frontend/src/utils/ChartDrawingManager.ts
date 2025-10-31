@@ -22,6 +22,87 @@ export class ChartDrawingManager {
   private onDrawingComplete: ((drawing: DrawingData) => Promise<void>) | null = null;
   private animationFrame: number | null = null;
 
+  // Crosshair state
+  private mouseScreenX: number | null = null;
+  private mouseScreenY: number | null = null;
+
+  private intervalSecondsMap: Record<Interval, number> = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+  };
+
+  private get intervalSeconds(): number {
+    return this.intervalSecondsMap[this.interval] ?? 60;
+  }
+
+  private getBarSpacing(): number {
+    const ts: any = this.chart.timeScale();
+    try {
+      const range = ts.getVisibleLogicalRange?.();
+      if (range) {
+        const to = (range.to as any);
+        const c2 = ts.logicalToCoordinate?.(to);
+        const c1 = ts.logicalToCoordinate?.(to - 1 as any);
+        if (c2 != null && c1 != null) {
+          const spacing = Math.abs((c2 as number) - (c1 as number));
+          if (spacing > 0.5) return spacing;
+        }
+      }
+    } catch {}
+    return 6;
+  }
+
+  private getLastCandleTime(): number | null {
+    const last = this.candles && this.candles.length > 0 ? this.candles[this.candles.length - 1] : null;
+    return last ? (last.time as number) : null;
+  }
+
+  private findReferenceTimeLeft(xStart: number): { xRef: number; tRef: number } | null {
+    const ts = this.chart.timeScale();
+    const width = this.canvas?.getBoundingClientRect().width ?? 0;
+    const begin = Math.min(Math.floor(xStart), Math.max(0, Math.floor(width) - 1));
+    // scan full width to the left
+    for (let x = begin; x >= 0; x--) {
+      const t = ts.coordinateToTime(x as any);
+      if (t !== null && t !== undefined) {
+        return { xRef: x, tRef: Math.round(t as number) };
+      }
+    }
+    // fallback: use last candle time
+    const lastTime = this.getLastCandleTime();
+    if (lastTime !== null) {
+      const xr = ts.timeToCoordinate(lastTime as unknown as UTCTimestamp);
+      if (xr !== null && xr !== undefined) {
+        return { xRef: xr as number, tRef: lastTime };
+      }
+    }
+    return null;
+  }
+
+  private timeToXWithFallback(timeSec: number): number | null {
+    const ts = this.chart.timeScale();
+    const x = ts.timeToCoordinate(timeSec as unknown as UTCTimestamp);
+    if (x !== null && x !== undefined) return x as number;
+    // try last candle reference first
+    const lastTime = this.getLastCandleTime();
+    if (lastTime !== null) {
+      const xr = ts.timeToCoordinate(lastTime as unknown as UTCTimestamp);
+      if (xr !== null && xr !== undefined) {
+        const bars = (timeSec - lastTime) / this.intervalSeconds;
+        return (xr as number) + bars * this.getBarSpacing();
+      }
+    }
+    // else scan left across canvas
+    const ref = this.findReferenceTimeLeft((this.canvas?.getBoundingClientRect().width ?? 1) - 1);
+    if (!ref) return null;
+    const bars = (timeSec - ref.tRef) / this.intervalSeconds;
+    return ref.xRef + bars * this.getBarSpacing();
+  }
+
   constructor(
     chart: IChartApi,
     series: ISeriesApi<"Candlestick">,
@@ -54,6 +135,10 @@ export class ChartDrawingManager {
       canvas.addEventListener("mousedown", (e) => this.onMouseDown(e));
       canvas.addEventListener("mousemove", (e) => this.onMouseMove(e));
       canvas.addEventListener("mouseup", (e) => this.onMouseUp(e));
+      canvas.addEventListener("mouseleave", () => {
+        this.mouseScreenX = null;
+        this.mouseScreenY = null;
+      });
     }
 
     this.canvas = canvas;
@@ -63,10 +148,18 @@ export class ChartDrawingManager {
 
   private resizeCanvas(): void {
     if (!this.canvas) return;
-    const container = this.canvas.parentElement;
+    const container = this.canvas.parentElement as HTMLElement;
     if (!container) return;
-    this.canvas.width = container.clientWidth;
-    this.canvas.height = container.clientHeight;
+    const rect = container.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    this.canvas.style.width = `${rect.width}px`;
+    this.canvas.style.height = `${rect.height}px`;
+    if (this.ctx) {
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.scale(dpr, dpr);
+    }
   }
 
   private startRenderLoop(): void {
@@ -75,29 +168,55 @@ export class ChartDrawingManager {
       this.animationFrame = requestAnimationFrame(render);
     };
     this.animationFrame = requestAnimationFrame(render);
+
+    // re-resize on chart time scale updates
+    this.chart.timeScale().subscribeVisibleTimeRangeChange(() => this.redraw());
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(() => this.redraw());
+    new ResizeObserver(() => this.resizeCanvas()).observe(document.querySelector('[data-chart-container]') as Element);
   }
 
   private screenToChartPoint(screenX: number, screenY: number): ChartPoint | null {
     const timeScale = this.chart.timeScale();
-    const time = timeScale.coordinateToTime(screenX);
+    let time = timeScale.coordinateToTime(screenX);
     const price = this.series.coordinateToPrice(screenY);
 
-    if (time === undefined || price === undefined || price === null) {
+    if (price === undefined || price === null) {
       return null;
+    }
+
+    if (time === undefined || time === null) {
+      // prefer last candle as reference
+      const lastTime = this.getLastCandleTime();
+      if (lastTime !== null) {
+        const xRef = timeScale.timeToCoordinate(lastTime as unknown as UTCTimestamp);
+        if (xRef !== null && xRef !== undefined) {
+          const dx = screenX - (xRef as number);
+          const bars = dx / this.getBarSpacing();
+          const extrapolated = lastTime + Math.round(bars * this.intervalSeconds);
+          return { time: extrapolated, price };
+        }
+      }
+      // fallback: scan left
+      const ref = this.findReferenceTimeLeft(screenX);
+      if (!ref) return null;
+      const dx = screenX - ref.xRef;
+      const bars = dx / this.getBarSpacing();
+      const extrapolated = ref.tRef + Math.round(bars * this.intervalSeconds);
+      return { time: extrapolated, price };
     }
 
     return { time: Math.round(time as number), price };
   }
 
   private chartToScreenPoint(chartPoint: ChartPoint): { x: number; y: number } | null {
-    const timeCoord = this.chart.timeScale().timeToCoordinate(chartPoint.time as UTCTimestamp);
-    const priceCoord = this.series.priceToCoordinate(chartPoint.price);
+    const x = this.timeToXWithFallback(chartPoint.time);
+    const y = this.series.priceToCoordinate(chartPoint.price);
 
-    if (timeCoord === undefined || timeCoord === null || priceCoord === undefined || priceCoord === null) {
+    if (x === null || x === undefined || y === undefined || y === null) {
       return null;
     }
 
-    return { x: timeCoord, y: priceCoord };
+    return { x: x as number, y };
   }
 
   setTool(tool: "line" | "fib" | "rectangle" | "none"): void {
@@ -137,15 +256,12 @@ export class ChartDrawingManager {
     if (!chartPoint) return;
 
     if (!this.isDrawing) {
-      // 第一次点击：开始绘制
       this.isDrawing = true;
       this.startPoint = chartPoint;
       this.currentMousePoint = chartPoint;
     } else if (this.startPoint) {
-      // 第二次点击：完成绘制
       const endChartPoint = chartPoint;
 
-      // 检查移动距离
       if (
         Math.abs(endChartPoint.time - this.startPoint.time) < 1 &&
         Math.abs(endChartPoint.price - this.startPoint.price) < 0.00001
@@ -168,21 +284,27 @@ export class ChartDrawingManager {
   }
 
   private onMouseMove(event: MouseEvent): void {
-    if (!this.isDrawing || !this.canvas) return;
+    if (!this.canvas) return;
 
     const rect = this.canvas.getBoundingClientRect();
     const screenX = event.clientX - rect.left;
     const screenY = event.clientY - rect.top;
 
+    // Always keep crosshair position when tool is active
+    if (this.currentTool !== "none") {
+      this.mouseScreenX = screenX;
+      this.mouseScreenY = screenY;
+    }
+
+    // Update chart point for preview/drawing
     const chartPoint = this.screenToChartPoint(screenX, screenY);
     if (chartPoint) {
+      // While drawing, update the end point; otherwise just keep hover point
       this.currentMousePoint = chartPoint;
     }
   }
 
-  private onMouseUp(event: MouseEvent): void {
-    // 不需要鼠标抬起逻辑
-  }
+  private onMouseUp(_event: MouseEvent): void {}
 
   private createDrawing(p1: ChartPoint, p2: ChartPoint): DrawingData | null {
     const tool = this.currentTool;
@@ -207,16 +329,20 @@ export class ChartDrawingManager {
   private redraw(): void {
     if (!this.ctx || !this.canvas) return;
 
+    this.resizeCanvas();
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // 绘制已保存的图形
     for (const drawing of this.drawings.values()) {
       this.drawShape(drawing);
     }
 
-    // 绘制实时预览
     if (this.isDrawing && this.startPoint && this.currentMousePoint) {
       this.drawPreview(this.startPoint, this.currentMousePoint);
+    }
+
+    // Draw dashed crosshair when a tool is active
+    if (this.currentTool !== "none" && this.mouseScreenX != null && this.mouseScreenY != null) {
+      this.drawCrosshair(this.mouseScreenX, this.mouseScreenY);
     }
   }
 
@@ -249,7 +375,6 @@ export class ChartDrawingManager {
       this.drawFibonacci(p1.y, p2.y, p1.x, p2.x, color);
     }
 
-    // 绘制起点圆圈
     this.ctx.strokeStyle = color;
     this.ctx.lineWidth = 2;
     this.ctx.beginPath();
@@ -309,6 +434,29 @@ export class ChartDrawingManager {
 
       this.ctx.fillText(`${(level * 100).toFixed(1)}%`, x2 + 5, y + 4);
     }
+  }
+
+  private drawCrosshair(x: number, y: number): void {
+    if (!this.ctx || !this.canvas) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([5, 5]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+
+    // Vertical line
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, this.canvas.height);
+    ctx.stroke();
+
+    // Horizontal line
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(this.canvas.width, y + 0.5);
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   removeDrawing(drawingId: string): void {
