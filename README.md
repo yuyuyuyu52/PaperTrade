@@ -81,3 +81,4 @@ The command outputs static assets under `frontend/dist/`. Serve them with a stat
 
 - yuyuyuyu52
 - jiangmy
+- jiangcy
