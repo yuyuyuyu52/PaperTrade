@@ -76,3 +76,7 @@ The command outputs static assets under `frontend/dist/`. Serve them with a stat
 - Broaden instrument coverage or allow user-managed watchlists.
 - Add configurable playback speed and keyboard shortcuts.
 - Implement alerts or indicators computed on cached data.
+
+## Contributor
+
+- yuyuyuyu52
