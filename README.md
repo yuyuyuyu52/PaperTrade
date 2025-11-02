@@ -80,3 +80,4 @@ The command outputs static assets under `frontend/dist/`. Serve them with a stat
 ## Contributor
 
 - yuyuyuyu52
+- jiangmy
