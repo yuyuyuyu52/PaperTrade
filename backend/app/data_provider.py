@@ -10,6 +10,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 from starlette.concurrency import run_in_threadpool
 import websockets
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+import ssl, certifi
 
 from .binance_client import fetch_earliest_open_time, fetch_klines
 from .config import INSTRUMENTS, INTERVAL_SECONDS, Instrument, resolve_binance_symbol
@@ -24,10 +25,31 @@ from .storage import (
 
 UTC = timezone.utc
 MAX_REMOTE_BATCH = 1000
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
+BINANCE_WS_URL = "wss://stream.binance.com/ws"
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 logger = logging.getLogger(__name__)
 
+# latest live close price per (symbol, interval)
+_LAST_PRICE: Dict[Tuple[str, str], float] = {}
+
+def get_latest_price(symbol: str, interval: str) -> Optional[float]:
+    return _LAST_PRICE.get((symbol.upper(), interval))
+
+async def get_live_price_ws(symbol: str, interval: str, timeout: float = 1.5) -> float:
+    """Await the next WS tick for symbol/interval and return its close price.
+    Raises asyncio.TimeoutError on timeout.
+    """
+    state, queue = await _subscribe_stream(symbol, interval)
+    try:
+        import asyncio as _asyncio
+        payload = await _asyncio.wait_for(queue.get(), timeout=timeout)
+        candle = payload.get("candle") if isinstance(payload, dict) else None
+        if not candle or "close" not in candle:
+            raise RuntimeError("Invalid WS payload for price")
+        return float(candle["close"])
+    finally:
+        await _unsubscribe_stream(state, queue)
 
 class _StreamState:
     __slots__ = (
@@ -72,7 +94,7 @@ class _StreamState:
                     await _broadcast(self, {"candle": candle, "final": True})
 
                 stream_url = f"{BINANCE_WS_URL}/{self.binance_symbol.lower()}@kline_{self.interval}"
-                async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20, open_timeout=30) as ws:
+                async with websockets.connect(stream_url, ssl=SSL_CONTEXT, ping_interval=20, ping_timeout=20, open_timeout=30) as ws:
                     logger.info("Connected Binance stream %s %s", self.symbol, self.interval)
                     backoff = 1.0
                     async for message in ws:
@@ -110,6 +132,11 @@ class _StreamState:
             "close": float(kline["c"]),
             "volume": float(kline["v"]),
         }
+        # update latest live price cache
+        try:
+            _LAST_PRICE[(self.symbol, self.interval)] = candle["close"]
+        except Exception:
+            pass
 
         step = INTERVAL_SECONDS[self.interval]
         open_time = candle["time"]

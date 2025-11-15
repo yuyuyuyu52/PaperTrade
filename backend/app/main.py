@@ -1,9 +1,13 @@
-from datetime import datetime, timezone
-from typing import List, Optional
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Literal
+
+from calendar import monthrange
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+from pydantic import BaseModel, Field, model_validator
 
 from .config import INTERVAL_MINUTES
 from .data_provider import (
@@ -32,6 +36,12 @@ from .trading_storage import (
     reset_account_stats,
 )
 from .trading_engine import get_trading_engine
+from .data_provider import get_live_price_ws, get_latest_price
+from .events_bus import (
+    subscribe as events_subscribe,
+    unsubscribe as events_unsubscribe,
+    set_event_loop as events_set_event_loop,
+)
 
 app = FastAPI(title="TradingView Clone API", version="0.1.0")
 logger = logging.getLogger("ws")
@@ -48,6 +58,11 @@ app.add_middleware(
     ,
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _register_events_loop() -> None:
+    events_set_event_loop(asyncio.get_running_loop())
 
 
 @app.get("/health")
@@ -111,6 +126,229 @@ def _validate_symbol(symbol: str) -> str:
     return uppercase
 
 
+DEFAULT_MODE = "realtime"
+VALID_MODES = {"realtime", "playback"}
+DEFAULT_INTERVAL = "1m"
+DEFAULT_LIST_LIMIT = 50
+MAX_LIST_LIMIT = 500
+
+
+def _normalize_mode(mode: Optional[str]) -> str:
+    value = (mode or DEFAULT_MODE).lower()
+    if value not in VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"Unsupported mode: {mode}")
+    return value
+
+
+def _normalize_interval(interval: Optional[str]) -> str:
+    value = (interval or DEFAULT_INTERVAL).lower()
+    if value not in INTERVAL_MINUTES:
+        raise HTTPException(status_code=400, detail=f"Unsupported interval: {value}")
+    return value
+
+
+def _normalize_limit(limit: Optional[int], default: int = DEFAULT_LIST_LIMIT) -> int:
+    if limit is None:
+        return default
+    if limit < 1 or limit > MAX_LIST_LIMIT:
+        raise HTTPException(status_code=400, detail=f"limit must be between 1 and {MAX_LIST_LIMIT}")
+    return limit
+
+
+def _paginate_items(items, sort_key, limit: int):
+    ordered = sorted(items, key=sort_key, reverse=True)
+    total = len(ordered)
+    if limit is not None:
+        ordered = ordered[:limit]
+    return ordered, total
+
+
+def _resolve_account(symbol: str, mode: Optional[str], interval: Optional[str]):
+    uppercase_symbol = _validate_symbol(symbol)
+    normalized_mode = _normalize_mode(mode)
+    interval_value = _normalize_interval(interval)
+    account_id, account = get_or_create_account(normalized_mode, uppercase_symbol, interval_value)
+    return account_id, account, normalized_mode, interval_value, uppercase_symbol
+
+
+def _account_payload(
+    symbol: str,
+    mode: Optional[str],
+    interval: Optional[str],
+    orders_limit: Optional[int] = None,
+    trades_limit: Optional[int] = None,
+    closed_positions_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    orders_limit_value = _normalize_limit(orders_limit)
+    trades_limit_value = _normalize_limit(trades_limit)
+    closed_limit_value = _normalize_limit(closed_positions_limit)
+
+    account_id, account, _, _, _ = _resolve_account(symbol, mode, interval)
+    stats = get_account_stats(account_id)
+    return _serialize_account(
+        account,
+        stats,
+        account_id,
+        orders_limit=orders_limit_value,
+        trades_limit=trades_limit_value,
+        closed_positions_limit=closed_limit_value,
+    )
+
+
+def _reset_account_state(symbol: str, mode: Optional[str], interval: Optional[str]) -> Dict[str, Any]:
+    account_id, account, normalized_mode, interval_value, uppercase_symbol = _resolve_account(symbol, mode, interval)
+
+    initial_balance = account.initial_balance
+    account.balance = initial_balance
+    account.positions = []
+    account.orders = []
+    account.trades = []
+    account.closed_positions = []
+
+    clear_orders(account_id)
+    clear_trades(account_id)
+    reset_account_stats(account_id)
+
+    save_account(account_id, account)
+
+    logger.info(f"[ResetAccount] Account reset: {normalized_mode}/{uppercase_symbol}/{interval_value}")
+    return {"success": True, "balance": account.balance}
+
+
+def _serialize_account(
+    account,
+    stats: Optional[Any] = None,
+    account_id: Optional[int] = None,
+    *,
+    orders_limit: int = DEFAULT_LIST_LIMIT,
+    trades_limit: int = DEFAULT_LIST_LIMIT,
+    closed_positions_limit: int = DEFAULT_LIST_LIMIT,
+) -> Dict[str, Any]:
+    """Convert account dataclass into a serializable structure."""
+    positions_payload = []
+    total_position_value = 0.0
+    for p in account.positions:
+        positions_payload.append(
+            {
+                "symbol": p.symbol,
+                "quantity": p.quantity,
+                "entry_price": p.entry_price,
+                "entry_time": p.entry_time,
+                "take_profit_price": p.take_profit_price,
+                "stop_loss_price": p.stop_loss_price,
+            }
+        )
+        total_position_value += abs(p.quantity) * p.entry_price
+
+    orders_sorted, orders_total = _paginate_items(
+        account.orders,
+        sort_key=lambda o: getattr(o, "create_time", 0),
+        limit=orders_limit,
+    )
+
+    orders_payload = [
+        {
+            "id": o.id,
+            "symbol": o.symbol,
+            "direction": o.direction,
+            "type": o.type,
+            "quantity": o.quantity,
+            "price": o.price,
+            "create_time": o.create_time,
+            "filled_quantity": o.filled_quantity,
+            "filled_price": o.filled_price,
+            "status": o.status,
+        }
+        for o in orders_sorted
+    ]
+
+    trades_sorted, trades_total = _paginate_items(
+        account.trades,
+        sort_key=lambda t: getattr(t, "timestamp", 0),
+        limit=trades_limit,
+    )
+
+    trades_payload = [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "direction": t.direction,
+            "quantity": t.quantity,
+            "price": t.price,
+            "timestamp": t.timestamp,
+            "commission": t.commission,
+        }
+        for t in trades_sorted
+    ]
+
+    closed_sorted, closed_total = _paginate_items(
+        account.closed_positions,
+        sort_key=lambda cp: getattr(cp, "exit_time", 0),
+        limit=closed_positions_limit,
+    )
+
+    closed_positions_payload = [
+        {
+            "id": cp.id,
+            "symbol": cp.symbol,
+            "direction": cp.direction,
+            "quantity": cp.quantity,
+            "entry_price": cp.entry_price,
+            "entry_time": cp.entry_time,
+            "exit_price": cp.exit_price,
+            "exit_time": cp.exit_time,
+            "profit_loss": cp.profit_loss,
+            "commission": cp.commission,
+            "days_held": cp.days_held(),
+            "return_pct": cp.return_pct(),
+        }
+        for cp in closed_sorted
+    ]
+
+    stats_payload: Dict[str, Any] = {}
+    if stats:
+        stats_payload = {
+            "total_trades": stats.total_trades,
+            "winning_trades": stats.winning_trades,
+            "losing_trades": stats.losing_trades,
+            "win_rate": stats.win_rate,
+            "profit_factor": stats.profit_factor,
+            "max_drawdown": stats.max_drawdown,
+            "max_drawdown_pct": stats.max_drawdown_pct,
+            "sharpe_ratio": stats.sharpe_ratio,
+            "cagr": stats.cagr,
+            "cumulative_return": stats.cumulative_return,
+            "total_return": stats.total_return,
+        }
+
+    # Unrealized PnL is not tracked server-side without market data; keep zero for now.
+    unrealized_pnl = 0.0
+    equity = account.balance + total_position_value + unrealized_pnl
+
+    return {
+        "account_id": account_id,
+        "mode": account.mode,
+        "symbol": account.symbol,
+        "interval": account.interval,
+        "initial_balance": account.initial_balance,
+        "balance": account.balance,
+        "positions": positions_payload,
+        "orders": orders_payload,
+        "trades": trades_payload,
+        "closed_positions": closed_positions_payload,
+        "orders_total": orders_total,
+        "orders_limit": orders_limit,
+        "trades_total": trades_total,
+        "trades_limit": trades_limit,
+        "closed_positions_total": closed_total,
+        "closed_positions_limit": closed_positions_limit,
+        "stats": stats_payload,
+        "positions_value": total_position_value,
+        "unrealized_pnl": unrealized_pnl,
+        "equity": equity,
+    }
+
+
 @app.post("/api/drawings")
 def create_drawing(drawing: Drawing) -> Drawing:
     """Save a new drawing."""
@@ -149,42 +387,23 @@ def clear_drawings(symbol: str = Query(..., min_length=1), interval: str = Query
     return {"success": True, "deleted": count}
 
 
-@app.post("/api/accounts/{mode}/{symbol}/{interval}/reset")
-def reset_account(mode: str, symbol: str, interval: str) -> dict:
-    """Reset account to initial state."""
+@app.post("/api/account/reset")
+def reset_account(
+    symbol: str = Query(..., description="Symbol"),
+    mode: Optional[str] = Query(None, description="Trading mode"),
+    interval: Optional[str] = Query(None, description="Interval context"),
+) -> Dict[str, Any]:
     try:
-        uppercase_symbol = _validate_symbol(symbol)
-    except HTTPException as exc:
-        raise exc
-    
-    if mode not in ["realtime", "playback"]:
-        raise HTTPException(status_code=400, detail="Invalid mode")
-    
-    interval = interval.lower()
-    if interval not in INTERVAL_MINUTES:
-        raise HTTPException(status_code=400, detail="Unsupported interval")
-    
-    # Get account
-    account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
-    
-    # Reset to initial balance
-    initial_balance = account.initial_balance
-    account.balance = initial_balance
-    account.positions = []
-    account.orders = []
-    account.trades = []
-    account.closed_positions = []
+        return _reset_account_state(symbol, mode, interval)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Clear orders/trades and reset stats, then persist positions/closed positions (empty)
-    clear_orders(account_id)
-    clear_trades(account_id)
-    reset_account_stats(account_id)
 
-    # Save reset account
-    save_account(account_id, account)
-    
-    logger.info(f"[ResetAccount] Account reset: {mode}/{uppercase_symbol}/{interval}")
-    return {"success": True, "balance": account.balance}
+@app.post("/api/accounts/{mode}/{symbol}/{interval}/reset")
+def reset_account_legacy(mode: str, symbol: str, interval: str) -> Dict[str, Any]:
+    return reset_account(symbol=symbol, mode=mode, interval=interval)
 
 
 def _check_and_trigger_tpsl(mode: str, symbol: str, interval: str, candle: dict) -> None:
@@ -247,135 +466,166 @@ async def stream_candles(websocket: WebSocket, symbol: str, interval: str) -> No
 
 # ============ Trading API Endpoints ============
 
-class OrderRequest:
-    def __init__(self, direction: str, type: str, quantity: float, price: Optional[float] = None):
-        self.direction = direction
-        self.type = type
-        self.quantity = quantity
-        self.price = price
+
+class OrderPayload(BaseModel):
+    symbol: str = Field(..., min_length=1, description="Trading symbol")
+    direction: Literal["buy", "sell"]
+    type: Literal["market", "limit"]
+    quantity: float = Field(..., gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    current_price: Optional[float] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_price(self) -> "OrderPayload":
+        if self.type == "limit" and self.price is None:
+            raise ValueError("price is required for limit orders")
+        if self.type == "market" and self.price is not None:
+            raise ValueError("price is only allowed for limit orders")
+        return self
+
+
+@app.get("/api/account")
+def get_account(
+    symbol: str = Query(..., description="Symbol"),
+    mode: Optional[str] = Query(None, description="Trading mode"),
+    interval: Optional[str] = Query(None, description="Interval context"),
+    orders_limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT, description="Maximum orders to include"),
+    trades_limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT, description="Maximum trades to include"),
+    closed_positions_limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT, description="Maximum closed positions to include"),
+):
+    """Get account information. Defaults to realtime mode and 1m interval if not provided."""
+    try:
+        return _account_payload(
+            symbol,
+            mode,
+            interval,
+            orders_limit=orders_limit,
+            trades_limit=trades_limit,
+            closed_positions_limit=closed_positions_limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/accounts/{mode}")
-def get_account(
+def get_account_by_mode(
     mode: str,
     symbol: str = Query(..., description="Symbol"),
     interval: str = Query(..., description="Interval"),
 ):
-    """Get account information."""
+    return get_account(symbol=symbol, mode=mode, interval=interval)
+
+
+@app.websocket("/ws/account")
+async def account_events(
+    websocket: WebSocket,
+    symbol: str,
+    mode: Optional[str] = None,
+    interval: Optional[str] = None,
+    orders_limit: Optional[int] = None,
+    trades_limit: Optional[int] = None,
+    closed_positions_limit: Optional[int] = None,
+) -> None:
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        account_id, account, _, _, _ = _resolve_account(symbol, mode, interval)
+    except HTTPException as exc:
+        await websocket.close(code=4400, reason=exc.detail)
+        return
+
+    await websocket.accept()
+
+    try:
+        orders_limit_value = _normalize_limit(orders_limit)
+        trades_limit_value = _normalize_limit(trades_limit)
+        closed_limit_value = _normalize_limit(closed_positions_limit)
         stats = get_account_stats(account_id)
-        
-        return {
-            "account_id": account_id,
-            "mode": account.mode,
-            "symbol": account.symbol,
-            "interval": account.interval,
-            "initial_balance": account.initial_balance,
-            "balance": account.balance,
-            "positions": [
-                {
-                    "symbol": p.symbol,
-                    "quantity": p.quantity,
-                    "entry_price": p.entry_price,
-                    "entry_time": p.entry_time,
-                    "take_profit_price": p.take_profit_price,
-                    "stop_loss_price": p.stop_loss_price,
-                }
-                for p in account.positions
-            ],
-            "orders": [
-                {
-                    "id": o.id,
-                    "symbol": o.symbol,
-                    "direction": o.direction,
-                    "type": o.type,
-                    "quantity": o.quantity,
-                    "price": o.price,
-                    "create_time": o.create_time,
-                    "filled_quantity": o.filled_quantity,
-                    "filled_price": o.filled_price,
-                    "status": o.status,
-                }
-                for o in account.orders
-            ],
-            "trades": [
-                {
-                    "id": t.id,
-                    "symbol": t.symbol,
-                    "direction": t.direction,
-                    "quantity": t.quantity,
-                    "price": t.price,
-                    "timestamp": t.timestamp,
-                    "commission": t.commission,
-                }
-                for t in account.trades
-            ],
-            "closed_positions": [
-                {
-                    "id": cp.id,
-                    "symbol": cp.symbol,
-                    "direction": cp.direction,
-                    "quantity": cp.quantity,
-                    "entry_price": cp.entry_price,
-                    "entry_time": cp.entry_time,
-                    "exit_price": cp.exit_price,
-                    "exit_time": cp.exit_time,
-                    "profit_loss": cp.profit_loss,
-                    "commission": cp.commission,
-                    "days_held": cp.days_held(),
-                    "return_pct": cp.return_pct(),
-                }
-                for cp in account.closed_positions
-            ],
-            "stats": {
-                "total_trades": stats.total_trades if stats else 0,
-                "winning_trades": stats.winning_trades if stats else 0,
-                "losing_trades": stats.losing_trades if stats else 0,
-                "win_rate": stats.win_rate if stats else 0,
-                "profit_factor": stats.profit_factor if stats else 0,
-                "max_drawdown": stats.max_drawdown if stats else 0,
-                "sharpe_ratio": stats.sharpe_ratio if stats else 0,
-                "cagr": stats.cagr if stats else 0,
-                "cumulative_return": stats.cumulative_return if stats else 0,
-            } if stats else {},
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        snapshot = _serialize_account(
+            account,
+            stats,
+            account_id,
+            orders_limit=orders_limit_value,
+            trades_limit=trades_limit_value,
+            closed_positions_limit=closed_limit_value,
+        )
+        await websocket.send_json({"type": "snapshot", "account": snapshot})
+
+        queue = await events_subscribe(account_id)
+        try:
+            while True:
+                payload = await queue.get()
+                await websocket.send_json(payload)
+        finally:
+            await events_unsubscribe(account_id, queue)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        await websocket.close(code=1011, reason=str(exc))
 
 
 @app.post("/api/orders")
-def place_order(
-    mode: str = Query(...),
-    symbol: str = Query(...),
-    interval: str = Query(...),
-    direction: str = Query(..., description="buy or sell"),
-    order_type: str = Query(..., description="market or limit", alias="type"),
-    quantity: float = Query(...),
-    price: Optional[float] = Query(None),
-    current_price: float = Query(...),
+async def place_order(
+    payload: OrderPayload,
+    mode: Optional[str] = Query(None, description="Trading mode"),
+    interval: Optional[str] = Query(None, description="Interval used for pricing"),
 ):
-    """Place an order."""
+    """Place an order using the latest backend price for market orders."""
     try:
-        print(f"[DEBUG] POST /api/orders received: mode={mode}, symbol={symbol}, interval={interval}, direction={direction}, type={order_type}, quantity={quantity}, price={price}, current_price={current_price}")
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        uppercase_symbol = _validate_symbol(payload.symbol)
+    except HTTPException as exc:
+        raise exc
+
+    normalized_mode = _normalize_mode(mode)
+    interval_value = _normalize_interval(interval)
+
+    try:
+        account_id, account = get_or_create_account(normalized_mode, uppercase_symbol, interval_value)
         engine = get_trading_engine(account_id, account)
-        
-        if order_type == "market":
-            order = engine.place_market_order(uppercase_symbol, direction, quantity, current_price)
-        elif order_type == "limit":
-            if price is None:
-                raise ValueError("Price required for limit orders")
-            order = engine.place_limit_order(uppercase_symbol, direction, quantity, price)
+
+        logger.debug(
+            "[Orders] request body=%s mode=%s interval=%s",
+            payload.model_dump(),
+            normalized_mode,
+            interval_value,
+        )
+
+        if payload.type == "market":
+            latest_price: Optional[float] = None
+            try:
+                latest_price = await get_live_price_ws(uppercase_symbol, interval_value, timeout=2.0)
+            except Exception:
+                # Fallback: use client-provided current_price -> cached WS price -> latest stored candle
+                fallback = payload.current_price if payload.current_price and payload.current_price > 0 else None
+                if fallback is None:
+                    cached = get_latest_price(uppercase_symbol, interval_value)
+                    if cached is not None:
+                        fallback = cached
+                if fallback is None:
+                    try:
+                        candles_latest = await fetch_candles(symbol=uppercase_symbol, interval=interval_value, limit=1)
+                        if candles_latest:
+                            fallback = float(candles_latest[-1]["close"])
+                    except Exception:
+                        pass
+                if fallback is None:
+                    raise HTTPException(status_code=503, detail="Live price unavailable")
+                latest_price = float(fallback)
+            order = engine.place_market_order(
+                uppercase_symbol,
+                payload.direction,
+                payload.quantity,
+                float(latest_price),
+            )
         else:
-            raise ValueError("Invalid order type")
-        
+            assert payload.price is not None  # validator guarantees
+            order = engine.place_limit_order(
+                uppercase_symbol,
+                payload.direction,
+                payload.quantity,
+                payload.price,
+            )
+
         return {
             "id": order.id,
             "symbol": order.symbol,
@@ -388,24 +638,30 @@ def place_order(
             "filled_price": order.filled_price,
             "status": order.status,
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/orders")
 def list_orders(
-    mode: str = Query(...),
     symbol: str = Query(...),
-    interval: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
     """List orders."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
-        
-        return [
+        _, account, _, _, _ = _resolve_account(symbol, mode, interval)
+        ordered = sorted(account.orders, key=lambda o: getattr(o, "create_time", 0), reverse=True)
+        total = len(ordered)
+        paged = ordered[offset:offset + limit]
+
+        items = [
             {
                 "id": o.id,
                 "symbol": o.symbol,
@@ -418,25 +674,30 @@ def list_orders(
                 "filled_price": o.filled_price,
                 "status": o.status,
             }
-            for o in account.orders
+            for o in paged
         ]
+
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(items) < total,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/orders/{order_id}")
-def cancel_order(
+async def cancel_order(
     order_id: str,
-    mode: str = Query(...),
     symbol: str = Query(...),
-    interval: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
 ):
     """Cancel an order."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        account_id, account, _, _, _ = _resolve_account(symbol, mode, interval)
         engine = get_trading_engine(account_id, account)
         
         if engine.cancel_order(order_id):
@@ -451,18 +712,20 @@ def cancel_order(
 
 @app.get("/api/trades")
 def list_trades(
-    mode: str = Query(...),
     symbol: str = Query(...),
-    interval: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
     """List trades."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
-        
-        return [
+        _, account, _, _, _ = _resolve_account(symbol, mode, interval)
+        ordered = sorted(account.trades, key=lambda t: getattr(t, "timestamp", 0), reverse=True)
+        total = len(ordered)
+        paged = ordered[offset:offset + limit]
+
+        items = [
             {
                 "id": t.id,
                 "symbol": t.symbol,
@@ -472,26 +735,36 @@ def list_trades(
                 "timestamp": t.timestamp,
                 "commission": t.commission,
             }
-            for t in account.trades
+            for t in paged
         ]
+
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(items) < total,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/closed-positions")
 def list_closed_positions(
-    mode: str = Query(...),
     symbol: str = Query(...),
-    interval: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
     """List closed positions (completed trades from entry to exit)."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
-        
-        return [
+        _, account, _, _, _ = _resolve_account(symbol, mode, interval)
+        ordered = sorted(account.closed_positions, key=lambda cp: getattr(cp, "exit_time", 0), reverse=True)
+        total = len(ordered)
+        paged = ordered[offset:offset + limit]
+
+        items = [
             {
                 "id": cp.id,
                 "symbol": cp.symbol,
@@ -506,27 +779,32 @@ def list_closed_positions(
                 "days_held": cp.days_held(),
                 "return_pct": cp.return_pct(),
             }
-            for cp in account.closed_positions
+            for cp in paged
         ]
+
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(items) < total,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/account-stats/{mode}")
+@app.get("/api/account-stats")
 def get_stats(
-    mode: str,
     symbol: str = Query(...),
-    interval: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
 ):
     """Get account statistics."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        account_id, account, _, _, _ = _resolve_account(symbol, mode, interval)
         engine = get_trading_engine(account_id, account)
         stats = engine.calculate_stats()
-        
+
         return {
             "total_trades": stats.total_trades,
             "winning_trades": stats.winning_trades,
@@ -547,20 +825,26 @@ def get_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/positions/tpsl")
-def set_position_tpsl(
-    mode: str = Query(...),
+@app.get("/api/account-stats/{mode}")
+def get_stats_by_mode(
+    mode: str,
     symbol: str = Query(...),
     interval: str = Query(...),
+):
+    return get_stats(symbol=symbol, mode=mode, interval=interval)
+
+
+@app.post("/api/positions/tpsl")
+async def set_position_tpsl(
+    symbol: str = Query(...),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
     take_profit_price: Optional[float] = Query(None),
     stop_loss_price: Optional[float] = Query(None),
 ):
     """Set take profit and stop loss for a position."""
     try:
-        # Validate and uppercase symbol
-        uppercase_symbol = _validate_symbol(symbol)
-        
-        account_id, account = get_or_create_account(mode, uppercase_symbol, interval)
+        account_id, account, _, _, uppercase_symbol = _resolve_account(symbol, mode, interval)
         engine = get_trading_engine(account_id, account)
         
         success = engine.set_position_tpsl(uppercase_symbol, take_profit_price, stop_loss_price)
@@ -575,3 +859,52 @@ def set_position_tpsl(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/daily-pnl")
+def daily_pnl(
+    symbol: str = Query(...),
+    month: str = Query(..., description="Month in YYYY-MM format (UTC)"),
+    mode: Optional[str] = Query(None),
+    interval: Optional[str] = Query(None),
+):
+    """Aggregate realized PnL by day for the specified month (UTC)."""
+    try:
+        account_id, account, _, _, _ = _resolve_account(symbol, mode, interval)
+    except HTTPException as exc:
+        raise exc
+
+    try:
+        start_dt = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid month format, expected YYYY-MM") from exc
+
+    # Determine month boundaries in UTC
+    days_in_month = monthrange(start_dt.year, start_dt.month)[1]
+    end_dt = start_dt + timedelta(days=days_in_month)
+
+    daily: Dict[str, float] = {}
+    for cp in account.closed_positions:
+        exit_dt = datetime.fromtimestamp(cp.exit_time, tz=timezone.utc)
+        if not (start_dt <= exit_dt < end_dt):
+            continue
+        date_key = exit_dt.strftime("%Y-%m-%d")
+        net_pnl = cp.profit_loss - cp.commission
+        daily[date_key] = daily.get(date_key, 0.0) + net_pnl
+
+    days_payload = [
+        {"date": day, "pnl": value}
+        for day, value in sorted(daily.items())
+    ]
+
+    return {"month": month, "days": days_payload}
+
+
+@app.get("/api/daily-pnl/{mode}")
+def daily_pnl_by_mode(
+    mode: str,
+    symbol: str = Query(...),
+    interval: str = Query(...),
+    month: str = Query(..., description="Month in YYYY-MM format (UTC)"),
+):
+    return daily_pnl(symbol=symbol, month=month, mode=mode, interval=interval)
