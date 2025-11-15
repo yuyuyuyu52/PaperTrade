@@ -6,6 +6,7 @@ from typing import Optional, Tuple, List
 import math
 
 from .trading_models import Account, Order, Position, Trade, ClosedPosition, AccountStats
+from .events_bus import dispatch as dispatch_event
 from .trading_storage import (
     save_account, save_order, save_trade, save_account_stats, 
     get_account_stats
@@ -76,7 +77,8 @@ class TradingEngine:
         
         # 市价单立即成交
         self._fill_order(order, current_price)
-        
+        # Broadcast market order fill
+        dispatch_event(self.account_id, {"type": "order", "order_id": order.id, "status": "filled"})
         return order
     
     def place_limit_order(self, symbol: str, direction: str, quantity: float, limit_price: float) -> Order:
@@ -175,6 +177,7 @@ class TradingEngine:
             if should_fill:
                 self._fill_order(order, fill_price)
                 filled_orders.append(order)
+                dispatch_event(self.account_id, {"type": "order", "order_id": order.id, "status": order.status})
         
         return filled_orders
     
@@ -210,21 +213,24 @@ class TradingEngine:
         )
         self.account.trades.append(trade)
         save_trade(self.account_id, trade)
+        dispatch_event(self.account_id, {"type": "trade", "trade_id": trade.id, "symbol": trade.symbol, "price": trade.price, "qty": trade.quantity})
         
         # 更新仓位（会返回平仓盈亏）
-        pnl = self._update_position(order.symbol, order.direction, fill_qty, fill_price)
+        cash_flow = self._update_position(order.symbol, order.direction, fill_qty, fill_price)
         
         # 更新账户余额
-        if pnl is not None:
-            # 这是平仓操作，返还保证金和盈亏
-            self.account.balance += pnl
+        if cash_flow is not None:
+            # 平仓：入账本次平仓成交额，扣除本次手续费
+            self.account.balance += cash_flow - commission
         else:
-            # 这是开仓或加仓操作，扣除保证金和手续费
+            # 开/加仓：扣除本次成交成本与手续费
             self.account.balance -= fill_qty * fill_price + commission
         
         # 保存订单和账户
         save_order(self.account_id, order)
         save_account(self.account_id, self.account)
+        positions_value = sum(abs(pos.quantity) * pos.entry_price for pos in self.account.positions)
+        dispatch_event(self.account_id, {"type": "account", "balance": self.account.balance, "positions_value": positions_value})
     
     def _update_position(self, symbol: str, direction: str, quantity: float, price: float) -> Optional[float]:
         """
@@ -237,7 +243,7 @@ class TradingEngine:
             price: 价格
         
         Returns:
-            Optional[float]: 如果是平仓，返回实现的盈亏（包含保证金返还和盈亏，已扣除手续费）；否则返回 None
+            Optional[float]: 如果是平仓，返回本次平仓成交额（现金流入）；否则返回 None
         """
         pos = self.account.get_position(symbol)
         
@@ -296,17 +302,16 @@ class TradingEngine:
                         commission=commission
                     )
                     self.account.closed_positions.append(closed_pos)
+                    dispatch_event(self.account_id, {"type": "closed_position", "id": closed_pos.id, "pnl": closed_pos.profit_loss, "symbol": closed_pos.symbol})
                     
                     # 从仓位列表中移除
                     self.account.positions.remove(pos)
                     
-                    # 返还金额 = 开仓保证金 + 平仓价值
-                    # 这样余额变化 = -开仓保证金 + 平仓价值 = 盈亏
-                    returned_amount = closed_qty * old_entry_price + closed_qty * price
-                    return returned_amount
+                    # 平仓现金流入 = 本次成交金额（已在开仓时扣除成本）
+                    return closed_qty * price
                 else:
-                    # 部分平仓
-                    return None
+                    # 部分平仓：入账本次平仓成交额
+                    return quantity * price
             else:
                 # 加仓
                 old_qty = pos.quantity
@@ -331,6 +336,7 @@ class TradingEngine:
             if order.id == order_id and order.status == "open":
                 order.status = "cancelled"
                 save_order(self.account_id, order)
+                dispatch_event(self.account_id, {"type": "order", "order_id": order.id, "status": order.status})
                 return True
         return False
     
@@ -371,6 +377,7 @@ class TradingEngine:
         pos.take_profit_price = take_profit_price
         pos.stop_loss_price = stop_loss_price
         save_account(self.account_id, self.account)
+        dispatch_event(self.account_id, {"type": "position", "symbol": symbol, "tp": take_profit_price, "sl": stop_loss_price})
         return True
     
     def check_tpsl_triggers(self, symbol: str, current_price: float, high: Optional[float] = None, low: Optional[float] = None) -> List[Order]:
@@ -397,31 +404,23 @@ class TradingEngine:
         close_price = current_price
         
         if pos.quantity > 0:  # 多头
-            # 止盈：检查最高价是否触及
-            if pos.take_profit_price is not None:
-                if (high is not None and high >= pos.take_profit_price) or (high is None and current_price >= pos.take_profit_price):
-                    should_close = True
-                    reason = "止盈"
-                    close_price = pos.take_profit_price  # 按止盈价成交
-            # 止损：检查最低价是否触及
-            elif pos.stop_loss_price is not None:
-                if (low is not None and low <= pos.stop_loss_price) or (low is None and current_price <= pos.stop_loss_price):
-                    should_close = True
-                    reason = "止损"
-                    close_price = pos.stop_loss_price  # 按止损价成交
+            if pos.take_profit_price is not None and ((high is not None and high >= pos.take_profit_price) or (high is None and current_price >= pos.take_profit_price)):
+                should_close = True
+                reason = "止盈"
+                close_price = pos.take_profit_price
+            if not should_close and pos.stop_loss_price is not None and ((low is not None and low <= pos.stop_loss_price) or (low is None and current_price <= pos.stop_loss_price)):
+                should_close = True
+                reason = "止损"
+                close_price = pos.stop_loss_price
         elif pos.quantity < 0:  # 空头
-            # 止盈：检查最低价是否触及
-            if pos.take_profit_price is not None:
-                if (low is not None and low <= pos.take_profit_price) or (low is None and current_price <= pos.take_profit_price):
-                    should_close = True
-                    reason = "止盈"
-                    close_price = pos.take_profit_price  # 按止盈价成交
-            # 止损：检查最高价是否触及
-            elif pos.stop_loss_price is not None:
-                if (high is not None and high >= pos.stop_loss_price) or (high is None and current_price >= pos.stop_loss_price):
-                    should_close = True
-                    reason = "止损"
-                    close_price = pos.stop_loss_price  # 按止损价成交
+            if pos.take_profit_price is not None and ((low is not None and low <= pos.take_profit_price) or (low is None and current_price <= pos.take_profit_price)):
+                should_close = True
+                reason = "止盈"
+                close_price = pos.take_profit_price
+            if not should_close and pos.stop_loss_price is not None and ((high is not None and high >= pos.stop_loss_price) or (high is None and current_price >= pos.stop_loss_price)):
+                should_close = True
+                reason = "止损"
+                close_price = pos.stop_loss_price
         
         if should_close:
             # 触发平仓

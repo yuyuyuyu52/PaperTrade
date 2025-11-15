@@ -69,14 +69,12 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const tradingMode = mode === "realtime" ? "realtime" : "playback";
-
     setAccountPositions([]);
     setOpenOrders([]);
 
     const fetchAccountSnapshot = async () => {
       try {
-        const account = await getAccount(tradingMode, selectedSymbol, interval);
+        const account = await getAccount(selectedSymbol);
         if (cancelled) {
           return;
         }
@@ -291,19 +289,22 @@ function App() {
         direction,
         type,
         quantity,
-        currentPrice,
-        limitPrice
+        price_source: "ws-hotkey",
+        limitPrice,
+        currentPrice
       });
       
       await placeOrder(
-        tradingMode,
         selectedSymbol.toUpperCase(),
-        interval,
         direction,
         type,
         quantity,
-        currentPrice,
-        limitPrice
+        {
+          mode: tradingMode,
+          interval,
+          limitPrice,
+          currentPrice
+        }
       );
       
       console.log("[Hotkey] Order placed successfully");

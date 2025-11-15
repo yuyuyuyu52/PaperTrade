@@ -75,13 +75,15 @@ export function QuickTradeBar({
       }
 
       await placeOrder(
-        mode,
         symbol.toUpperCase(),
-        interval,
         direction,
         "market",
         qty,
-        currentPrice
+        {
+          mode,
+          interval,
+          currentPrice
+        }
       );
 
       alert(

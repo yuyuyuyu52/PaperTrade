@@ -36,12 +36,12 @@ from .trading_storage import (
     reset_account_stats,
 )
 from .trading_engine import get_trading_engine
-from .data_provider import get_live_price_ws, get_latest_price
 from .events_bus import (
     subscribe as events_subscribe,
     unsubscribe as events_unsubscribe,
     set_event_loop as events_set_event_loop,
 )
+from .storage import get_latest_price
 
 app = FastAPI(title="TradingView Clone API", version="0.1.0")
 logger = logging.getLogger("ws")
@@ -591,31 +591,16 @@ async def place_order(
         )
 
         if payload.type == "market":
-            latest_price: Optional[float] = None
-            try:
-                latest_price = await get_live_price_ws(uppercase_symbol, interval_value, timeout=2.0)
-            except Exception:
-                # Fallback: use client-provided current_price -> cached WS price -> latest stored candle
-                fallback = payload.current_price if payload.current_price and payload.current_price > 0 else None
-                if fallback is None:
-                    cached = get_latest_price(uppercase_symbol, interval_value)
-                    if cached is not None:
-                        fallback = cached
-                if fallback is None:
-                    try:
-                        candles_latest = await fetch_candles(symbol=uppercase_symbol, interval=interval_value, limit=1)
-                        if candles_latest:
-                            fallback = float(candles_latest[-1]["close"])
-                    except Exception:
-                        pass
-                if fallback is None:
-                    raise HTTPException(status_code=503, detail="Live price unavailable")
-                latest_price = float(fallback)
+            latest_price = payload.current_price
+            if latest_price is None:
+                latest_price = get_latest_price(uppercase_symbol, interval_value)
+            if latest_price is None:
+                raise HTTPException(status_code=503, detail="Latest market price unavailable")
             order = engine.place_market_order(
                 uppercase_symbol,
                 payload.direction,
                 payload.quantity,
-                float(latest_price),
+                latest_price,
             )
         else:
             assert payload.price is not None  # validator guarantees

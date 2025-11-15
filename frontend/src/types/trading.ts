@@ -49,6 +49,14 @@ export interface Trade {
   commission: number;
 }
 
+export interface Paginated<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
 export interface AccountStats {
   total_trades: number;
   winning_trades: number;
@@ -73,9 +81,18 @@ export interface Account {
   interval: string;
   initial_balance: number;
   balance: number;
+  positions_value?: number;
+  equity?: number;
+  unrealized_pnl?: number;
   positions: Position[];
   orders: Order[];
   trades: Trade[];
   closed_positions: ClosedPosition[];
+  orders_total?: number;
+  orders_limit?: number;
+  trades_total?: number;
+  trades_limit?: number;
+  closed_positions_total?: number;
+  closed_positions_limit?: number;
   stats: Partial<AccountStats>;
 }

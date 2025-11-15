@@ -163,6 +163,40 @@ def get_latest_open_time(symbol: str, interval: str) -> Optional[int]:
     return int(row["open_time"]) if row else None
 
 
+def get_latest_candle(symbol: str, interval: str) -> Optional[dict]:
+    """Fetch the latest completed candle for the given symbol/interval."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT open_time, close_time, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND interval = ?
+            ORDER BY open_time DESC
+            LIMIT 1
+            """,
+            (symbol.upper(), interval),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "time": int(row["open_time"]),
+        "close_time": int(row["close_time"]),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": float(row["volume"]),
+    }
+
+
+def get_latest_price(symbol: str, interval: str) -> Optional[float]:
+    """Return the close price of the most recent completed candle."""
+    candle = get_latest_candle(symbol, interval)
+    return candle["close"] if candle else None
+
+
 def get_time_range(symbol: str, interval: str) -> Tuple[Optional[int], Optional[int]]:
     with _connect() as conn:
         row = conn.execute(
